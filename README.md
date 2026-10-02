@@ -2,9 +2,14 @@
 
 Upscaling and frame generation for Vulkan Minecraft on Macs. The world is rendered at a lower resolution and upscaled by Apple MetalFX or AMD FSR 3.1. 
 
+![BSL shaders and Distant Horizons with MetalFX upscaling and frame generation](docs/screenshot-bsl-dh.jpg)
+
+*MetalFX Temporal at 50% render scale with MetalFX frame generation, BSL shaders + Distant Horizons, at 3024x1898:
+45 fps native, 86 fps with upscaling.*
+
 ### WARNING: 
 
-This mod was created quickly using a lot of AI as a proof of concept, it is NOT a polished mod. I will not be releasing it on Modrinth or CurseForge for this reason, I'm sure it has bugs and MetalFX/FSR seem to have a bit more overhead than I was expecting. 
+This mod was created quickly using significant AI help as a proof of concept, it is NOT a polished mod. I will not be releasing it on Modrinth or CurseForge for this reason, I'm sure it has bugs and MetalFX/FSR seem to have a bit more overhead than I was expecting. 
 
 The intention of this mod was to test the new Vulkan graphics backend in Minecraft, and to test MoltenVK's Vulkan -> Metal bridging by implementing some native Metal features. I hope it can provide a jumping point to help other upscaler mod creators make use of MetalFX/FSR and better support Mac users. 
 
