@@ -1,0 +1,15 @@
+{
+	"schemaVersion": 1,
+	"id": "metalfx-test",
+	"version": "1.0.0",
+	"name": "MetalFX visual test",
+	"environment": "client",
+	"entrypoints": {
+		"fabric-client-gametest": [
+			"dev.metalfxmc.test.MetalFXScreenshotTest"
+		]
+	},
+	"depends": {
+		"metalfx": "*"
+	}
+}

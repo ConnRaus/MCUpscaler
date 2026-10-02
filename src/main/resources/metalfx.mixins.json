@@ -1,0 +1,21 @@
+{
+  "required": true,
+  "package": "dev.metalfxmc.mixin",
+  "compatibilityLevel": "JAVA_25",
+  "client": [
+    "FrontendGpuDeviceAccessor",
+    "GameRendererMixin",
+    "MinecraftMixin",
+    "GlobalSettingsUniformMixin",
+    "ShaderManagerMixin",
+    "SkyRendererMixin",
+    "SodiumUniformBufferManagerMixin",
+    "VitrailHandDrawMixin",
+    "VitrailPackChainMixin",
+    "VitrailShaderPackSourceMixin",
+    "VulkanFeatureSetsMixin"
+  ],
+  "injectors": {
+    "defaultRequire": 1
+  }
+}

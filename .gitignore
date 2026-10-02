@@ -1,0 +1,12 @@
+.gradle/
+build/
+out/
+run/
+.idea/
+*.iml
+.vscode/
+.DS_Store
+hs_err_*.log
+# local jars and old comparison screenshots
+libs/
+/*.png

@@ -1,0 +1,7 @@
+{
+	"key.category.metalfx.metalfx": "MetalFX",
+	"key.metalfx.toggle": "Toggle upscaling",
+	"key.metalfx.cycle_scale": "Next render scale",
+	"key.metalfx.cycle_mode": "Next upscaler",
+	"key.metalfx.frame_generation": "Toggle frame generation"
+}

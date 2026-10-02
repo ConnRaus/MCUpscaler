@@ -1,0 +1,33 @@
+{
+	"schemaVersion": 1,
+	"id": "metalfx",
+	"version": "${version}",
+	"name": "MetalFX",
+	"description": "Upscaling (AMD FSR 3.1, Apple MetalFX) and frame generation for Minecraft on macOS. Renders the world at a lower resolution while the HUD stays sharp. Needs the Vulkan graphics backend.",
+	"authors": [
+		"ConnRaus"
+	],
+	"license": "MIT",
+	"icon": "assets/metalfx/icon.png",
+	"environment": "client",
+	"entrypoints": {
+		"client": [
+			"dev.metalfxmc.MetalFXMod"
+		],
+		"sodium:config_api_user": [
+			"dev.metalfxmc.SodiumOptions"
+		]
+	},
+	"mixins": [
+		"metalfx.mixins.json"
+	],
+	"depends": {
+		"fabricloader": ">=0.19.5",
+		"minecraft": "~26.3",
+		"java": ">=25",
+		"fabric-api": "*"
+	},
+	"suggests": {
+		"sodium": "*"
+	}
+}

@@ -1,0 +1,116 @@
+plugins {
+	id 'net.fabricmc.fabric-loom' version "${loom_version}"
+}
+
+version = project.version
+group = project.group
+
+repositories {
+	maven {
+		name = 'Modrinth'
+		url = 'https://api.modrinth.com/maven'
+		content { includeGroup 'maven.modrinth' }
+	}
+}
+
+base {
+	archivesName = 'metalfx'
+}
+
+dependencies {
+	minecraft "com.mojang:minecraft:${project.minecraft_version}"
+	implementation "net.fabricmc:fabric-loader:${project.loader_version}"
+	implementation "net.fabricmc.fabric-api:fabric-api:${project.fabric_api_version}"
+
+	// Sodium's config API (the settings page in Video Settings); optional at runtime.
+	compileOnly "maven.modrinth:sodium:${project.sodium_version}"
+
+	// ./gradlew runClientGameTest -PtestMods=a.jar,b.jar : extra mods (e.g. Sodium + Vitrail) for compatibility/perf tests.
+	if (project.hasProperty('testMods')) {
+		localRuntime files(project.property('testMods').split(','))
+	}
+}
+
+// Automated in-game test (./gradlew runClientGameTest): creates a world and takes comparison screenshots.
+fabricApi {
+	configureTests {
+		createSourceSet = true
+		modId = "metalfx-test"
+		enableGameTests = false
+		enableClientGameTests = true
+		eula = true
+	}
+}
+
+// -PtestRunFiles=<dir>: copied into the (freshly wiped) game test run directory, e.g. shaderpacks/ + vitrail/pack.txt.
+if (project.hasProperty('testRunFiles')) {
+	tasks.register('copyTestRunFiles', Copy) {
+		from(project.property('testRunFiles'))
+		into(layout.projectDirectory.dir('build/run/clientGameTest'))
+		mustRunAfter 'deleteGameTestRunDir'
+	}
+	tasks.named('runClientGameTest') { dependsOn 'copyTestRunFiles' }
+}
+
+loom {
+	runs.configureEach {
+		programArgs "--graphicsBackend", "vulkan"
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Native bridge: a tiny Objective-C dylib that drives MetalFX.
+// Built as a universal binary and bundled into the jar under /natives.
+// ---------------------------------------------------------------------------
+def nativeSrc = file('src/native/metalfx_bridge.m')
+def nativeOutDir = layout.buildDirectory.dir('native/natives')
+
+tasks.register('buildNative', Exec) {
+	inputs.dir('src/native')
+	outputs.dir(nativeOutDir)
+	def out = nativeOutDir.get().file('libmetalfx_bridge.dylib').asFile
+	doFirst { out.parentFile.mkdirs() }
+	commandLine 'xcrun', 'clang',
+		'-dynamiclib', '-fobjc-arc', '-O2', '-Wall',
+		'-arch', 'arm64', '-arch', 'x86_64',
+		'-mmacosx-version-min=13.0',
+		'-framework', 'Foundation', '-framework', 'Metal', '-framework', 'MetalFX', '-framework', 'QuartzCore', '-framework', 'AppKit', '-framework', 'ImageIO', '-framework', 'CoreGraphics',
+		'-install_name', '@rpath/libmetalfx_bridge.dylib',
+		'-o', out.absolutePath,
+		nativeSrc.absolutePath
+}
+
+processResources {
+	dependsOn 'buildNative'
+	from(layout.buildDirectory.dir('native')) {
+		include 'natives/**'
+	}
+
+	def version = project.version
+	inputs.property "version", version
+	filesMatching("fabric.mod.json") {
+		expand "version": version
+	}
+}
+
+tasks.withType(JavaCompile).configureEach {
+	it.options.release = 25
+}
+
+java {
+	sourceCompatibility = JavaVersion.VERSION_25
+	targetCompatibility = JavaVersion.VERSION_25
+}
+
+// ./gradlew deployToInstance -Pinstance_mods_dir=<mods folder> (or set it in ~/.gradle/gradle.properties)
+tasks.register('deployToInstance', Copy) {
+	dependsOn 'build'
+	from(tasks.named('jar'))
+	into(providers.gradleProperty('instance_mods_dir').orElse(providers.provider {
+		throw new GradleException('Set instance_mods_dir to the mods folder to deploy to')
+	}))
+	doFirst {
+		// Remove older builds of this mod from the instance
+		fileTree(project.property('instance_mods_dir')).matching { include 'metalfx-*.jar' }.each { it.delete() }
+	}
+}
