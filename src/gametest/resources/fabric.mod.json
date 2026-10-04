@@ -1,0 +1,15 @@
+{
+	"schemaVersion": 1,
+	"id": "dlssmc-test",
+	"version": "1.0.0",
+	"name": "DLSS visual test",
+	"environment": "client",
+	"entrypoints": {
+		"fabric-client-gametest": [
+			"dev.dlssmc.test.DlssScreenshotTest"
+		]
+	},
+	"depends": {
+		"dlssmc": "*"
+	}
+}

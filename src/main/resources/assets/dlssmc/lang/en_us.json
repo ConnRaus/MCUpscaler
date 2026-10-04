@@ -1,0 +1,7 @@
+{
+	"key.category.dlssmc.dlssmc": "DLSS",
+	"key.dlssmc.toggle": "Toggle DLSS",
+	"key.dlssmc.cycle_quality": "Next DLSS quality mode",
+	"key.dlssmc.cycle_preset": "Next DLSS preset",
+	"key.dlssmc.frame_generation": "Toggle frame generation"
+}

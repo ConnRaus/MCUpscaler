@@ -1,0 +1,33 @@
+{
+	"schemaVersion": 1,
+	"id": "dlssmc",
+	"version": "${version}",
+	"name": "DLSS",
+	"description": "NVIDIA DLSS 4 Super Resolution (transformer model) and DLAA for Minecraft on Windows. Renders the world at a lower resolution while the HUD stays sharp. Needs the Vulkan graphics backend and an NVIDIA RTX GPU.",
+	"authors": [
+		"ConnRaus"
+	],
+	"license": "MIT",
+	"icon": "assets/dlssmc/icon.png",
+	"environment": "client",
+	"entrypoints": {
+		"client": [
+			"dev.dlssmc.DlssMod"
+		],
+		"sodium:config_api_user": [
+			"dev.dlssmc.SodiumOptions"
+		]
+	},
+	"mixins": [
+		"dlssmc.mixins.json"
+	],
+	"depends": {
+		"fabricloader": ">=0.19.5",
+		"minecraft": "~26.3",
+		"java": ">=25",
+		"fabric-api": "*"
+	},
+	"suggests": {
+		"sodium": "*"
+	}
+}
