@@ -12,3 +12,15 @@ libs/
 /*.png
 # SDKs, caches, test worlds and analysis files (kept local, see memory notes)
 _deps/
+
+# stray logs and native build leftovers (the DLL is built into build/)
+*.log
+*.obj
+*.exp
+*.lib
+*.pdb
+
+# local tool and OS clutter
+.claude/settings.local.json
+Thumbs.db
+.fleet/
