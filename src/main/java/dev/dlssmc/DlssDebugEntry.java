@@ -48,24 +48,36 @@ public class DlssDebugEntry implements DebugScreenEntry {
 		int outW = main.width, outH = main.height;
 		int[] world = WorldUpscaler.worldRenderSize();
 		if (world == null) {
-			lines.add("DLSS: off (native)" + (DlssConfig.enabled && !WorldUpscaler.isDlssReady() ? ", " + WorldUpscaler.unavailableReason() : ""));
+			lines.add("Upscaler: off (native)" + (DlssConfig.enabled && !WorldUpscaler.isUpscalerReady(DlssConfig.upscaler)
+				? ", " + DlssConfig.upscaler.displayName() + " " + WorldUpscaler.unavailableReason(DlssConfig.upscaler) : ""));
 		} else {
-			boolean dlss = DlssConfig.upscaler == DlssConfig.Upscaler.DLSS && WorldUpscaler.isDlssReady();
-			lines.add("Upscaler: " + (dlss ? "DLSS " + DlssConfig.quality.displayName().replaceAll(" \\(.*", "") + ", preset "
-				+ DlssConfig.preset.displayName() : DlssConfig.upscaler == DlssConfig.Upscaler.DLSS ? "Bilinear (DLSS unavailable)" : "Bilinear"));
+			DlssConfig.Upscaler upscaler = DlssConfig.upscaler;
+			boolean temporal = upscaler.temporal() && WorldUpscaler.isUpscalerReady(upscaler);
+			String quality = DlssConfig.quality.displayName().replaceAll(" \\(.*", "");
+			String name = upscaler == DlssConfig.Upscaler.FSR ? fsrName() : "DLSS";
+			lines.add("Upscaler: " + (!temporal ? upscaler.temporal() ? "Bilinear (" + upscaler.displayName() + " unavailable)" : "Bilinear"
+				: upscaler == DlssConfig.Upscaler.DLSS ? name + " " + quality + ", preset " + WorldUpscaler.presetName()
+				: name + " " + quality + (DlssConfig.fsrSharpness > 0.0F
+					? String.format(Locale.ROOT, ", sharpness %d%%", Math.round(DlssConfig.fsrSharpness * 100)) : "")));
 			lines.add(String.format(Locale.ROOT, "Render resolution: %dx%d -> %dx%d (%d%%)", world[0], world[1], outW, outH,
 				Math.round(100.0F * world[0] / Math.max(1, outW))));
-			float[] gpu = dlss ? DlssNative.gpuTimes() : null;
+			float[] gpu = temporal ? DlssNative.gpuTimes() : null;
 			if (gpu != null && gpu[1] > 0.0F) {
-				lines.add(String.format(Locale.ROOT, "DLSS GPU time: %.2f ms (motion vectors %.2f, DLSS %.2f, copy %.2f)",
-					gpu[0] + gpu[1] + gpu[2], gpu[0], gpu[1], gpu[2]));
+				lines.add(String.format(Locale.ROOT, "Upscale GPU: %.2f ms (MV %.2f / %s %.2f / copy %.2f)",
+					gpu[0] + gpu[1] + gpu[2], gpu[0], upscaler.name(), gpu[1], gpu[2]));
 			}
 		}
 		String frameGen = FrameGen.statusLine();
-		lines.add(frameGen != null ? frameGen : "Frame generation: " + (!DlssConfig.frameGeneration ? "off"
-			: !WorldUpscaler.isFrameGenAvailable() ? "unavailable"
-			: !WorldUpscaler.hasFrameGenInputs() ? "off (no motion vectors with the Bilinear upscaler)" : "starting"));
+		DlssConfig.FrameGeneration backend = DlssConfig.frameGeneration;
+		lines.add(frameGen != null ? frameGen : backend == DlssConfig.FrameGeneration.OFF ? "Frame gen: off"
+			: "Frame gen (" + backend.name() + "): " + (!WorldUpscaler.isFrameGenAvailable(backend) ? "unavailable"
+			: !WorldUpscaler.hasFrameGenInputs() ? "off (not with Bilinear)" : "starting"));
 		lines.add(Reflex.statusLine());
 		displayer.addToGroup(ID, lines);
+	}
+
+	private static String fsrName() {
+		String version = DlssNative.fsrVersion();
+		return version.isEmpty() ? "FSR" : "FSR " + version;
 	}
 }

@@ -28,7 +28,7 @@ import org.lwjgl.vulkan.VK;
 import org.lwjgl.vulkan.VkDevice;
 
 /**
- * Renders the world into a reduced-resolution target and upscales it with DLSS into Minecraft's main target right before
+ * Renders the world into a reduced-resolution target and upscales it with DLSS or FSR into Minecraft's main target right before
  * the GUI is drawn, so the HUD stays at native resolution.
  * <p>
  * While the world is being drawn ("world phase"), every lookup of the main render target is redirected to
@@ -41,7 +41,7 @@ import org.lwjgl.vulkan.VkDevice;
  */
 public final class WorldUpscaler {
 	private static final int MAX_LOGGED_FAILURES = 5;
-	/** Failed frames after which DLSS is switched off until its settings change. */
+	/** Failed frames after which the upscaler is switched off until its settings change. */
 	private static final int FAILURES_BEFORE_DISABLE = 30;
 	/** A camera jump farther than this (squared) resets DLSS's history. */
 	private static final double TELEPORT_SQR = 64.0;
@@ -54,12 +54,21 @@ public final class WorldUpscaler {
 
 	private static State state = State.UNINITIALIZED;
 	/** NGX is up, DLSS Super Resolution is available and the compute passes are loaded. */
-	private static boolean dlssReady;
-	/** The compute passes that make motion vectors and depth are loaded (stays true when DLSS itself is given up on). */
+	private static boolean dlssSupported;
+	/** AMD FSR loaded and the compute passes are loaded. */
+	private static boolean fsrSupported;
+	/** As above, minus an upscaler given up on after repeated failures (until its settings change). */
+	private static boolean dlssReady, fsrReady;
+	/** The compute passes that make motion vectors and depth are loaded (stays true when an upscaler itself is given up on). */
 	private static boolean passesReady;
-	private static boolean frameGenAvailable;
+	private static boolean dlssFrameGenAvailable;
+	/** RTX 40 series or newer (Ada, Blackwell): runs DLSS's second-generation transformer (preset M) at full speed. */
+	private static boolean adaOrNewer;
 	private static boolean otherBackend;
+	/** Why DLSS can't run. */
 	private static String unavailableReason = "";
+	/** Why FSR can't run. */
+	private static String fsrUnavailableReason = "";
 	private static int loggedFailures;
 	/** Setting that DLSS was disabled for after repeated failures; another choice gets a fresh try. */
 	@Nullable
@@ -133,26 +142,26 @@ public final class WorldUpscaler {
 		}
 		if (!(device instanceof FrontendGpuDevice frontend)
 			|| !(((FrontendGpuDeviceAccessor)frontend).dlssmc$getBackend() instanceof VulkanDevice vk)) {
-			DlssMod.LOGGER.warn("Graphics backend is not Vulkan; DLSS is off");
+			DlssMod.LOGGER.warn("Graphics backend is not Vulkan; DLSS and FSR are off");
 			state = State.UNAVAILABLE;
 			otherBackend = true;
-			unavailableReason = "needs the Vulkan graphics backend";
+			unavailableReason = fsrUnavailableReason = "needs the Vulkan graphics backend";
 			return;
 		}
 		state = State.READY;
 		if (Boolean.getBoolean("dlssmc.skipNgx")) {
-			unavailableReason = "disabled by -Ddlssmc.skipNgx";
+			unavailableReason = fsrUnavailableReason = "disabled by -Ddlssmc.skipNgx";
 			return;
 		}
 		if (!DlssNative.load()) {
-			unavailableReason = "native bridge failed to load";
+			unavailableReason = fsrUnavailableReason = "native bridge failed to load";
 			return;
 		}
 		try {
 			initDlss(vk);
 		} catch (RuntimeException e) {
-			unavailableReason = e.toString();
-			DlssMod.LOGGER.error("DLSS initialisation failed", e);
+			unavailableReason = fsrUnavailableReason = e.toString();
+			DlssMod.LOGGER.error("DLSS/FSR initialisation failed", e);
 		}
 	}
 
@@ -163,32 +172,94 @@ public final class WorldUpscaler {
 		long start = System.nanoTime();
 		int result = DlssNative.init(vk.instance().vkInstance().address(), vkDevice.getPhysicalDevice().address(), vkDevice.address(),
 			gipa, gdpa, DlssConfig.ngxLogging || Boolean.getBoolean("dlssmc.ngxLogging"));
-		if (result < 0 || (result & DlssNative.INIT_SUPER_RESOLUTION) == 0) {
-			unavailableReason = DlssNative.lastError();
-			DlssMod.LOGGER.warn("DLSS unavailable on {}: {}", vk.getDeviceInfo().name(), unavailableReason);
+		if (result < 0) {
+			unavailableReason = fsrUnavailableReason = DlssNative.lastError();
+			DlssMod.LOGGER.warn("DLSS and FSR unavailable on {}: {}", vk.getDeviceInfo().name(), unavailableReason);
+			return;
+		}
+		// NGX failing (not an NVIDIA RTX card) leaves its reason as the last error; FSR doesn't need NGX.
+		boolean dlss = (result & DlssNative.INIT_SUPER_RESOLUTION) != 0;
+		boolean fsr = (result & DlssNative.INIT_FSR) != 0;
+		String gpu = vk.getDeviceInfo().name();
+		if (!dlss) {
+			String error = DlssNative.lastError();
+			DlssMod.LOGGER.warn("DLSS unavailable on {}: {}", gpu, error);
+			unavailableReason = !gpu.contains("NVIDIA") || !gpu.contains("RTX") ? "needs an NVIDIA RTX card" : error;
+		}
+		if (!fsr) {
+			fsrUnavailableReason = "FSR failed to load";
+			DlssMod.LOGGER.warn("AMD FSR unavailable: {}", fsrUnavailableReason);
+		}
+		if (!dlss && !fsr) {
 			return;
 		}
 		if (!DlssNative.loadShaders(Shaders.compileAll())) {
-			unavailableReason = DlssNative.lastError();
-			DlssMod.LOGGER.error("DLSS compute passes failed to load: {}", unavailableReason);
+			unavailableReason = fsrUnavailableReason = DlssNative.lastError();
+			DlssMod.LOGGER.error("Compute passes failed to load: {}", unavailableReason);
 			return;
 		}
-		dlssReady = true;
 		passesReady = true;
-		frameGenAvailable = (result & DlssNative.INIT_FRAME_GENERATION) != 0;
-		DlssMod.LOGGER.info("NVIDIA DLSS ready on {} in {} ms (Super Resolution: yes, Frame Generation: {})", vk.getDeviceInfo().name(),
-			(System.nanoTime() - start) / 1_000_000, frameGenAvailable ? "yes, up to " + (DlssNative.frameGenMaxMultiFrame() + 1) + "x" : "no");
+		dlssSupported = dlssReady = dlss;
+		fsrSupported = fsrReady = fsr;
+		dlssFrameGenAvailable = dlss && (result & DlssNative.INIT_FRAME_GENERATION) != 0;
+		// DLSS Frame Generation needs Ada or newer; without it (e.g. Windows' hardware-accelerated GPU scheduling off), the name.
+		adaOrNewer = dlssFrameGenAvailable || NEWER_RTX.matcher(gpu).find();
+		pickSupportedDefaults();
+		DlssMod.LOGGER.info("Upscalers ready on {} in {} ms (DLSS Super Resolution: {}, DLSS Frame Generation: {}, AMD FSR: {})",
+			vk.getDeviceInfo().name(), (System.nanoTime() - start) / 1_000_000, dlss ? "yes" : "no",
+			dlssFrameGenAvailable ? "yes, up to " + (DlssNative.frameGenMaxMultiFrame() + 1) + "x" : "no", fsr ? "yes" : "no");
+	}
+
+	private static final java.util.regex.Pattern NEWER_RTX = java.util.regex.Pattern.compile("RTX\\s*(PRO\\b|[4-9]0\\d0|\\d+\\s*Ada)");
+
+	/**
+	 * Replaces an upscaler or frame generator this GPU can't run with the best one it can (DLSS by default on an AMD or
+	 * Intel card, DLSS Frame Generation on an RTX 30 series), so the defaults work on any GPU.
+	 */
+	private static void pickSupportedDefaults() {
+		boolean changed = false;
+		if (DlssConfig.upscaler == DlssConfig.Upscaler.DLSS && !dlssSupported && fsrSupported) {
+			DlssMod.LOGGER.info("DLSS can't run on this GPU; using AMD FSR 3.1");
+			DlssConfig.upscaler = DlssConfig.Upscaler.FSR;
+			changed = true;
+		}
+		if (DlssConfig.frameGeneration == DlssConfig.FrameGeneration.DLSS && !dlssFrameGenAvailable) {
+			DlssConfig.frameGeneration = fsrSupported ? DlssConfig.FrameGeneration.FSR : DlssConfig.FrameGeneration.OFF;
+			DlssMod.LOGGER.info("DLSS Frame Generation can't run on this GPU; frame generation set to {}",
+				DlssConfig.frameGeneration.displayName());
+			changed = true;
+		}
+		if (changed) {
+			DlssConfig.save();
+		}
+	}
+
+	/** The DLSS preset to use: Auto is M on RTX 40 series and newer, K on older cards. */
+	public static DlssConfig.Preset resolvedPreset() {
+		return DlssConfig.preset != DlssConfig.Preset.AUTO ? DlssConfig.preset : autoPreset();
+	}
+
+	/** What Auto means on this GPU. */
+	public static DlssConfig.Preset autoPreset() {
+		ensureInit();
+		return adaOrNewer ? DlssConfig.Preset.M : DlssConfig.Preset.K;
+	}
+
+	/** Preset for status lines: "Auto (M)", or the chosen one. */
+	public static String presetName() {
+		return DlssConfig.preset == DlssConfig.Preset.AUTO ? "Auto (" + resolvedPreset().name() + ")" : DlssConfig.preset.displayName();
 	}
 
 	/** Called right before Minecraft destroys its Vulkan device (game exit). */
 	public static void shutdown() {
 		if (state == State.READY) {
 			DlssNative.shutdown();
-			dlssReady = false;
+			dlssReady = dlssSupported = false;
+			fsrReady = fsrSupported = false;
 			passesReady = false;
-			frameGenAvailable = false;
+			dlssFrameGenAvailable = false;
 			state = State.UNAVAILABLE;
-			unavailableReason = "shut down";
+			unavailableReason = fsrUnavailableReason = "shut down";
 		}
 	}
 
@@ -203,47 +274,92 @@ public final class WorldUpscaler {
 		return unavailableReason;
 	}
 
+	/** Why an upscaler can't run. */
+	public static String unavailableReason(DlssConfig.Upscaler upscaler) {
+		return upscaler == DlssConfig.Upscaler.FSR ? fsrUnavailableReason : unavailableReason;
+	}
+
+	/** Why a frame generator can't run. */
+	public static String frameGenUnavailableReason(DlssConfig.FrameGeneration backend) {
+		if (backend == DlssConfig.FrameGeneration.FSR) {
+			return !fsrSupported ? fsrUnavailableReason : "";
+		}
+		return !dlssSupported ? unavailableReason : !dlssFrameGenAvailable ? "needs an RTX 40 or 50 series card" : "";
+	}
+
 	/** Upscaling (or DLAA) runs: the world renders into {@link #worldTarget}. */
 	public static boolean isActive() {
 		ensureInit();
 		if (state != State.READY || !DlssConfig.enabled) {
 			return false;
 		}
-		// DLAA (DLSS at 100%) still anti-aliases; a plain stretch at 100% would do nothing.
-		return DlssConfig.renderScale() < 0.999F || DlssConfig.upscaler == DlssConfig.Upscaler.DLSS && isDlssReady();
+		// DLAA (DLSS or FSR at 100%) still anti-aliases; a plain stretch at 100% would do nothing.
+		return DlssConfig.renderScale() < 0.999F || isTemporalUpscalerReady();
+	}
+
+	/** The selected upscaler is DLSS or FSR and can run. */
+	private static boolean isTemporalUpscalerReady() {
+		return DlssConfig.upscaler.temporal() && isUpscalerReady(DlssConfig.upscaler);
 	}
 
 	private static String currentSetting() {
 		return DlssConfig.upscaler + "@" + DlssConfig.quality + "/" + DlssConfig.renderScale() + "/" + DlssConfig.preset;
 	}
 
-	public static boolean isDlssReady() {
+	public static boolean isUpscalerReady(DlssConfig.Upscaler upscaler) {
 		ensureInit();
-		if (!dlssReady && failedSetting != null && !failedSetting.equals(currentSetting())) {
-			// The user picked another mode since DLSS was disabled: try again.
+		if (failedSetting != null && !failedSetting.equals(currentSetting())) {
+			// The user picked another mode since the upscaler was disabled: try again.
 			failedSetting = null;
 			loggedFailures = 0;
-			dlssReady = true;
+			dlssReady = dlssSupported;
+			fsrReady = fsrSupported;
 		}
-		return dlssReady;
+		return switch (upscaler) {
+			case DLSS -> dlssReady;
+			case FSR -> fsrReady;
+			case BILINEAR -> true;
+		};
 	}
 
-	/** DLSS was set up and works, without setting it up (safe off the render thread). */
-	public static boolean isDlssKnownReady() {
-		return dlssReady;
-	}
-
-	public static boolean isFrameGenAvailable() {
+	/** The upscaler can run on this machine at all (settings screen). */
+	public static boolean isUpscalerSupported(DlssConfig.Upscaler upscaler) {
 		ensureInit();
-		return frameGenAvailable;
+		return switch (upscaler) {
+			case DLSS -> dlssSupported;
+			case FSR -> fsrSupported;
+			case BILINEAR -> true;
+		};
+	}
+
+	public static boolean isDlssReady() {
+		return isUpscalerReady(DlssConfig.Upscaler.DLSS);
+	}
+
+	/** The selected temporal upscaler was set up and works, without setting it up (safe off the render thread). */
+	public static boolean isTemporalKnownReady() {
+		return switch (DlssConfig.upscaler) {
+			case DLSS -> dlssReady;
+			case FSR -> fsrReady;
+			case BILINEAR -> false;
+		};
+	}
+
+	public static boolean isFrameGenAvailable(DlssConfig.FrameGeneration backend) {
+		ensureInit();
+		return switch (backend) {
+			case OFF -> false;
+			case DLSS -> dlssFrameGenAvailable;
+			case FSR -> fsrSupported;
+		};
 	}
 
 	/**
 	 * Frame generation can get motion vectors and depth with the current settings: at the native resolution when not
-	 * upscaling, from DLSS when upscaling with it (a plain bilinear stretch has none).
+	 * upscaling, from DLSS or FSR when upscaling with them (a plain bilinear stretch has none).
 	 */
 	public static boolean hasFrameGenInputs() {
-		return passesReady && (!isActive() || DlssConfig.upscaler == DlssConfig.Upscaler.DLSS && isDlssReady());
+		return passesReady && (!isActive() || isTemporalUpscalerReady());
 	}
 
 	/** World render size while upscaling, or null (F3 screen). */
@@ -331,7 +447,7 @@ public final class WorldUpscaler {
 		}
 		realMainTarget = mainTarget;
 		inWorldPhase = true;
-		temporalFrame = DlssConfig.upscaler == DlssConfig.Upscaler.DLSS && isDlssReady();
+		temporalFrame = isTemporalUpscalerReady();
 		captureFrame = temporalFrame;
 		if (temporalFrame) {
 			jitterCamera(world.width, world.height, (double)mainTarget.width / world.width);
@@ -515,7 +631,7 @@ public final class WorldUpscaler {
 		if (result <= 0) {
 			logFailure(upscale, DlssNative.lastError());
 			if (result < 0 && upscale) {
-				disableDlss();
+				disableUpscaler();
 			}
 			return false;
 		}
@@ -547,12 +663,15 @@ public final class WorldUpscaler {
 		putFloats(DlssNative.FRAME_JITTER, jitterX, jitterY);
 		frame.set(ValueLayout.JAVA_INT, DlssNative.FRAME_RESET, reset ? 1 : 0);
 		frame.set(ValueLayout.JAVA_INT, DlssNative.FRAME_QUALITY, DlssConfig.ngxQuality());
-		frame.set(ValueLayout.JAVA_INT, DlssNative.FRAME_PRESET, DlssConfig.preset.ngxValue);
+		frame.set(ValueLayout.JAVA_INT, DlssNative.FRAME_PRESET, resolvedPreset().ngxValue);
 		frame.set(ValueLayout.JAVA_INT, DlssNative.FRAME_Z_ZERO_TO_ONE, RenderSystem.getDevice().getDeviceInfo().isZZeroToOne() ? 1 : 0);
 		long now = System.nanoTime();
 		frame.set(ValueLayout.JAVA_FLOAT, DlssNative.FRAME_FRAME_TIME, lastTemporalNanos == 0L ? 16.7F : (now - lastTemporalNanos) / 1.0e6F);
 		lastTemporalNanos = now;
-		frame.set(ValueLayout.JAVA_INT, DlssNative.FRAME_UPSCALE, upscale ? 1 : 0);
+		frame.set(ValueLayout.JAVA_INT, DlssNative.FRAME_UPSCALER, upscale ? DlssConfig.upscaler.nativeCode() : 0);
+		frame.set(ValueLayout.JAVA_FLOAT, DlssNative.FRAME_SHARPNESS, DlssConfig.fsrSharpness);
+		frame.set(ValueLayout.JAVA_FLOAT, DlssNative.FRAME_FOV, (float)(2.0 * Math.atan(1.0 / Math.abs(levelProjection.m11()))));
+		frame.set(ValueLayout.JAVA_FLOAT, DlssNative.FRAME_NEAR, 0.05F);
 	}
 
 	private static void writeMatrix(long offset, Matrix4f matrix) {
@@ -576,19 +695,25 @@ public final class WorldUpscaler {
 		}
 	}
 
-	private static void disableDlss() {
-		DlssMod.LOGGER.error("DLSS failed with {}; using bilinear until the DLSS settings change", currentSetting());
-		dlssReady = false;
+	private static void disableUpscaler() {
+		String name = DlssConfig.upscaler.displayName();
+		DlssMod.LOGGER.error("{} failed with {}; using bilinear until the upscaling settings change", name, currentSetting());
+		if (DlssConfig.upscaler == DlssConfig.Upscaler.FSR) {
+			fsrReady = false;
+		} else {
+			dlssReady = false;
+		}
 		failedSetting = currentSetting();
 	}
 
 	private static void logFailure(boolean upscale, String message) {
 		loggedFailures++;
 		if (loggedFailures <= MAX_LOGGED_FAILURES) {
-			DlssMod.LOGGER.warn(upscale ? "DLSS failed, using bilinear this frame: {}" : "No motion vectors for frame generation this frame: {}", message);
+			DlssMod.LOGGER.warn(upscale ? DlssConfig.upscaler.displayName() + " failed, using bilinear this frame: {}"
+				: "No motion vectors for frame generation this frame: {}", message);
 		}
-		if (upscale && loggedFailures == FAILURES_BEFORE_DISABLE && dlssReady) {
-			disableDlss();
+		if (upscale && loggedFailures == FAILURES_BEFORE_DISABLE && isTemporalKnownReady()) {
+			disableUpscaler();
 		}
 	}
 }

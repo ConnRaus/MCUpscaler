@@ -1,23 +1,13 @@
-// DLSS Frame Generation. Minecraft renders a frame and, instead of blitting it to the swapchain, this file copies it into
-// a ring slot (dlss_fg_record) and DLSS-G generates the frame halfway between the previous one and it. A present thread
-// owns the swapchain meanwhile: it shows the generated frame, waits half a frame and shows the real one, so the screen
-// gets two evenly spaced frames for each one rendered. The render thread may be one frame ahead of the present thread.
+// Frame Generation (DLSS-G or FSR). Minecraft renders a frame and, instead of blitting it to the swapchain, this file
+// copies it into a ring slot (dlss_fg_record) and DLSS-G or FSR generates the frame halfway between the previous one and
+// it. A present thread owns the swapchain meanwhile: it shows the generated frame, waits half a frame and shows the real
+// one, so the screen gets two evenly spaced frames for each one rendered. The render thread may be one frame ahead of the
+// present thread.
 
 #include "bridge.h"
 
-// Camera of the frame, written by Java after the motion vectors were made. Must match DlssNative.java (FG_CAMERA_*).
-struct FgCamera {
-    float viewToClip[16];     // 0   unjittered projection
-    float clipToView[16];     // 64
-    float clipToPrevClip[16]; // 128 current clip -> previous frame's clip (camera movement and rotation)
-    float prevClipToClip[16]; // 192
-    float pos[4], up[4], right[4], fwd[4]; // 256 world space
-    float nearZ, farZ, fov, aspect;        // 320 fov vertical, radians
-    float jitterX, jitterY;                // 336 render pixels
-    uint32_t reset;                        // 344
-    uint32_t pad;                          // 348
-};
-static_assert(sizeof(FgCamera) == 352, "FgCamera layout");
+// Which generator dlss_fg_record uses. Must match DlssNative.java (FG_BACKEND_*).
+enum FgBackend : int { FG_NONE = 0, FG_DLSS = 1, FG_FSR = 2 };
 
 // What Java has to add to Minecraft's submission around the recorded commands. Must match DlssNative.java.
 struct FgSubmit {
@@ -47,7 +37,9 @@ static VkFormat gFgSwapFormat;
 static bool gFgInterpValid[kFgSlots];
 static FgCamera gFgCamera;
 static bool gFgCameraValid;    // the motion vectors and depth are this frame's
-static bool gFgHistory;        // the previous frame went through DLSS-G
+static bool gFgHistory;        // the previous frame went through the generator
+static int gFgLastBackend;     // generator of the previous frame
+static double gFgLastRecord;   // nowSeconds() of the previous dlss_fg_record (FSR's frame time)
 static uint64_t gFgFrameId;
 static VkSemaphore gFgReady;     // timeline: render thread's copy + DLSS-G of a frame done
 static VkSemaphore gFgPresented; // timeline: present thread done reading a frame's slot
@@ -331,16 +323,16 @@ EXPORT void dlss_fg_stop(void) {
 // rendering queue family; swapFormat: the swapchain's VkFormat.
 EXPORT int dlss_fg_start(uint64_t queue, int queueFamily, int graphicsFamily, uint64_t swapchain, int swapFormat, const uint64_t *images,
                          int count, int width, int height) {
-    if (!gNgxReady || !gFrameGenAvailable) {
-        setError("DLSS Frame Generation unavailable");
+    if (!(gNgxReady && gFrameGenAvailable) && !gFfxReady) {
+        setError("no frame generation available (DLSS-G needs an RTX 40 series GPU; FSR needs amd_fidelityfx_vk.dll)");
         return 0;
     }
     dlss_fg_stop();
     if (!gFgReady) {
         gFgReady = createSemaphore(true);
         gFgPresented = createSemaphore(true);
-        NVSDK_NGX_VULKAN_AllocateParameters(&gFgParams);
-        if (!gFgReady || !gFgPresented || !gFgParams) {
+        if (gNgxReady) NVSDK_NGX_VULKAN_AllocateParameters(&gFgParams);
+        if (!gFgReady || !gFgPresented) {
             setError("could not create the frame generation semaphores");
             return 0;
         }
@@ -415,6 +407,10 @@ EXPORT int dlss_fg_present_times(float *out) {
 }
 
 static bool ensureFgFeature(VkCommandBuffer cb, uint32_t w, uint32_t h, VkFormat format) {
+    if (!gNgxReady || !gFrameGenAvailable || !gFgParams) {
+        setError("DLSS Frame Generation unavailable");
+        return false;
+    }
     uint32_t rw = gMotion.width, rh = gMotion.height;
     if (gFg && gFgW == w && gFgH == h && gFgFormat == format && gFgRenderW == rw && gFgRenderH == rh) return true;
     if (gFg) {
@@ -447,9 +443,10 @@ static bool ensureFgFeature(VkCommandBuffer cb, uint32_t w, uint32_t h, VkFormat
 }
 
 // Records, into commandBuffer, the copy of Minecraft's finished frame (final, with the HUD) into a ring slot and, if
-// interpolate and this frame has motion vectors, DLSS-G generating the frame before it. Java adds the semaphore operations of
-// *out to Minecraft's submission and then queues the frame with dlss_fg_queue. Returns 1, or 0 (see dlss_last_error).
-EXPORT int dlss_fg_record(uint64_t commandBuffer, const Tex *final, int interpolate, int notGame, FgSubmit *out) {
+// backend (FgBackend) isn't FG_NONE and this frame has motion vectors, DLSS-G or FSR generating the frame before it. Java
+// adds the semaphore operations of *out to Minecraft's submission and then queues the frame with dlss_fg_queue.
+// Returns 1, or 0 (see dlss_last_error).
+EXPORT int dlss_fg_record(uint64_t commandBuffer, const Tex *final, int backend, int notGame, FgSubmit *out) {
     VkCommandBuffer cb = (VkCommandBuffer)commandBuffer;
     bool cameraValid = gFgCameraValid;
     gFgCameraValid = false;
@@ -502,15 +499,27 @@ EXPORT int dlss_fg_record(uint64_t commandBuffer, const Tex *final, int interpol
 
     bool interp = false;
     bool inputsValid = cameraValid && gMotion.image && gDlssDepth.image;
-    if (interpolate && inputsValid && !notGame && ensureFgFeature(cb, w, h, format)) {
+    if (backend != gFgLastBackend) gFgHistory = false; // the other generator has no history of its own
+    gFgLastBackend = backend;
+    double now = nowSeconds();
+    float frameTimeMs = gFgLastRecord > 0.0 ? (float)((now - gFgLastRecord) * 1000.0) : 16.7f;
+    gFgLastRecord = now;
+    OwnedImage *hud = gLastOutput;
+    bool hudless = hud && hud->image && hud->width == w && hud->height == h;
+    if (backend == FG_FSR && inputsValid && !notGame) {
+        bool reset = gFgCamera.reset != 0 || !gFgHistory;
+        bool ok = fsrFrameGen(cb, id, reset, frameTimeMs, gFgReal[slot], hudless ? hud : nullptr, gFgInterp[slot], gFgCamera);
+        interp = ok && gFgHistory; // the first frame after a reset has nothing to interpolate from
+        gFgHistory = ok;
+        globalBarrier(cb);
+    } else if (backend == FG_DLSS && inputsValid && !notGame && ensureFgFeature(cb, w, h, format)) {
         NVSDK_NGX_Resource_VK backbuffer = resourceOf((uint64_t)gFgReal[slot].image, (uint64_t)gFgReal[slot].view, format, w, h, false);
         NVSDK_NGX_Resource_VK depth = resourceOf((uint64_t)gDlssDepth.image, (uint64_t)gDlssDepth.view, gDlssDepth.format,
             gDlssDepth.width, gDlssDepth.height, false);
         NVSDK_NGX_Resource_VK mvecs = resourceOf((uint64_t)gMotion.image, (uint64_t)gMotion.view, gMotion.format, gMotion.width,
             gMotion.height, false);
         NVSDK_NGX_Resource_VK output = resourceOf((uint64_t)gFgInterp[slot].image, (uint64_t)gFgInterp[slot].view, format, w, h, true);
-        OwnedImage *hud = gLastOutput;
-        bool hudless = hud && hud->image && hud->width == w && hud->height == h && hud->format == format;
+        hudless = hudless && hud->format == format;
         NVSDK_NGX_Resource_VK hudlessRes{};
         if (hudless) hudlessRes = resourceOf((uint64_t)hud->image, (uint64_t)hud->view, hud->format, w, h, false);
 

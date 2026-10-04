@@ -67,7 +67,7 @@ public final class VitrailCompat {
 	 * ghost on top of it: they are switched off while it is active.
 	 */
 	private static boolean wantedAaOff() {
-		return DlssConfig.enabled && DlssConfig.upscaler.temporal() && WorldUpscaler.isDlssKnownReady();
+		return DlssConfig.enabled && DlssConfig.upscaler.temporal() && WorldUpscaler.isTemporalKnownReady();
 	}
 
 	/**

@@ -69,9 +69,11 @@ loom {
 
 // ---------------------------------------------------------------------------
 // Native bridge: dlss_bridge.dll (MSVC, links NVIDIA's NGX SDK statically), bundled into the jar under
-// /natives/windows-x64 together with NVIDIA's DLSS libraries. The SDKs live in _deps (see README).
+// /natives/windows-x64 together with NVIDIA's DLSS libraries and AMD's FidelityFX (FSR 3.1) library, which the bridge
+// loads at runtime. The SDKs live in _deps (see README).
 // ---------------------------------------------------------------------------
 def dlssSdk = providers.environmentVariable('DLSS_SDK').orElse(file('_deps/dlss-sdk').absolutePath).get()
+def ffxSdk = providers.environmentVariable('FFX_SDK').orElse(file('_deps/ffx-sdk').absolutePath).get()
 def nativeOutDir = layout.buildDirectory.dir('native/natives/windows-x64')
 
 tasks.register('buildNative', Exec) {
@@ -85,13 +87,16 @@ tasks.register('copyDlssLibraries', Copy) {
 	from("${dlssSdk}/lib/Windows_x86_64/rel") {
 		include 'nvngx_dlss.dll', 'nvngx_dlssg.dll'
 	}
+	from("${ffxSdk}/PrebuiltSignedDLL") {
+		include 'amd_fidelityfx_vk.dll'
+	}
 	into(nativeOutDir)
 }
 
 processResources {
 	dependsOn 'buildNative', 'copyDlssLibraries'
 	from(layout.buildDirectory.dir('native')) {
-		include 'natives/**'
+		include 'natives/**/*.dll'
 	}
 
 	def version = project.version

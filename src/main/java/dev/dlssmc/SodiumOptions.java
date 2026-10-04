@@ -1,11 +1,15 @@
 package dev.dlssmc;
 
+import java.util.EnumSet;
+import java.util.Set;
 import net.caffeinemc.mods.sodium.api.config.ConfigEntryPoint;
+import net.caffeinemc.mods.sodium.api.config.ConfigState;
 import net.caffeinemc.mods.sodium.api.config.option.OptionImpact;
 import net.caffeinemc.mods.sodium.api.config.option.Range;
 import net.caffeinemc.mods.sodium.api.config.structure.ConfigBuilder;
 import net.caffeinemc.mods.sodium.api.config.structure.OptionGroupBuilder;
 import net.caffeinemc.mods.sodium.api.config.structure.OptionPageBuilder;
+import net.minecraft.ChatFormatting;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.PreferredGraphicsApi;
 import net.minecraft.client.gui.screens.ConfirmScreen;
@@ -32,13 +36,26 @@ public final class SodiumOptions implements ConfigEntryPoint {
 	@Override
 	public void registerConfigLate(ConfigBuilder builder) {
 		vulkan = !WorldUpscaler.needsVulkan();
-		String unavailable = vulkan && !WorldUpscaler.isDlssReady() ? "\n\nDLSS is unavailable: " + WorldUpscaler.unavailableReason() : "";
+		// Upscalers and frame generators this GPU can't run stay listed, crossed out, with the reason in the tooltip.
+		Set<DlssConfig.Upscaler> upscalers = EnumSet.noneOf(DlssConfig.Upscaler.class);
+		for (DlssConfig.Upscaler upscaler : DlssConfig.Upscaler.values()) {
+			if (!vulkan || WorldUpscaler.isUpscalerSupported(upscaler)) {
+				upscalers.add(upscaler);
+			}
+		}
+		DlssConfig.Upscaler defaultUpscaler = upscalers.contains(DlssConfig.Upscaler.DLSS) ? DlssConfig.Upscaler.DLSS
+			: upscalers.contains(DlssConfig.Upscaler.FSR) ? DlssConfig.Upscaler.FSR : DlssConfig.Upscaler.BILINEAR;
+		Set<DlssConfig.FrameGeneration> generators = EnumSet.noneOf(DlssConfig.FrameGeneration.class);
+		for (DlssConfig.FrameGeneration backend : DlssConfig.FrameGeneration.values()) {
+			if (backend == DlssConfig.FrameGeneration.OFF || !vulkan || WorldUpscaler.isFrameGenAvailable(backend)) {
+				generators.add(backend);
+			}
+		}
 		OptionGroupBuilder upscaling = builder.createOptionGroup()
 			.setName(Component.literal("Upscaling"))
 			.addOption(builder.createBooleanOption(id("enabled"))
-				.setName(Component.literal("Enable DLSS"))
-				.setTooltip(tip("Renders the world at a lower resolution and rebuilds it at your screen's resolution with NVIDIA DLSS, "
-					+ "for higher frame rates and anti-aliasing. The HUD and menus always stay at full resolution." + unavailable))
+				.setName(Component.literal("Enable Upscaling"))
+				.setTooltip(tip("Renders the world at a lower resolution and upscales it, for higher FPS. The HUD stays sharp."))
 				.setDefaultValue(true)
 				.setBinding(v -> DlssConfig.enabled = v, () -> DlssConfig.enabled)
 				.setImpact(OptionImpact.HIGH)
@@ -46,9 +63,10 @@ public final class SodiumOptions implements ConfigEntryPoint {
 				.setEnabled(vulkan))
 			.addOption(builder.createEnumOption(id("upscaler"), DlssConfig.Upscaler.class)
 				.setName(Component.literal("Upscaler"))
-				.setTooltip(mode -> tip(mode.description()))
-				.setElementNameProvider(mode -> Component.literal(mode.displayName()))
-				.setDefaultValue(DlssConfig.Upscaler.DLSS)
+				.setTooltip(mode -> tip(mode.description() + (upscalers.contains(mode) ? ""
+					: "\n\nNot available: " + WorldUpscaler.unavailableReason(mode) + ".")))
+				.setElementNameProvider(mode -> crossedOutUnless(upscalers.contains(mode), mode.displayName()))
+				.setDefaultValue(defaultUpscaler)
 				.setBinding(v -> DlssConfig.upscaler = v, () -> DlssConfig.upscaler)
 				.setImpact(OptionImpact.MEDIUM)
 				.setStorageHandler(DlssConfig::save)
@@ -56,13 +74,10 @@ public final class SodiumOptions implements ConfigEntryPoint {
 			.addOption(builder.createEnumOption(id("quality"), DlssConfig.Quality.class)
 				.setName(Component.literal("Quality Mode"))
 				.setTooltip(mode -> tip(switch (mode) {
-					case DLAA -> "Renders at full resolution and uses DLSS only as anti-aliasing. Best image, no speed-up.";
-					case QUALITY -> "Renders at 67% resolution per axis. Close to native image quality at a good speed-up.";
-					case BALANCED -> "Renders at 58% resolution per axis.";
-					case PERFORMANCE -> "Renders at 50% resolution per axis (a quarter of the pixels). Recommended for 4K screens.";
-					case ULTRA_PERFORMANCE -> "Renders at 33% resolution per axis. For 8K screens or very slow frame rates; visibly softer.";
-					case CUSTOM -> "Renders at the Custom Render Scale below.";
-				}))
+					case DLAA -> "100% resolution, used only for anti-aliasing.";
+					case CUSTOM -> "Uses the Custom Render Scale below.";
+					default -> Math.round(mode.scale * 100) + "% resolution.";
+				} + (mode == DlssConfig.Quality.CUSTOM ? "" : "\n(" + renderResolution(mode.scale) + ")")))
 				.setElementNameProvider(mode -> Component.literal(mode.displayName()))
 				.setDefaultValue(DlssConfig.Quality.QUALITY)
 				.setBinding(v -> DlssConfig.quality = v, () -> DlssConfig.quality)
@@ -71,43 +86,57 @@ public final class SodiumOptions implements ConfigEntryPoint {
 				.setEnabled(vulkan))
 			.addOption(builder.createIntegerOption(id("custom_scale"))
 				.setName(Component.literal("Custom Render Scale"))
-				.setTooltip(tip("Render scale per axis when Quality Mode is Custom (50% to 100%)."))
+				.setTooltip(v -> tip("Render resolution when Quality Mode is Custom.\n(" + renderResolution(v / 100.0F) + ")"))
 				.setDefaultValue(75)
-				.setRange(new Range(50, 100, 1))
+				// DLSS: 50-100%, FSR and Bilinear: 33-100% (DlssConfig.minCustomScale).
+				.setRangeProvider(state -> new Range(upscalerIs(state, DlssConfig.Upscaler.DLSS) ? 50 : 33, 100, 1), id("upscaler"))
 				.setValueFormatter(v -> Component.literal(v + "%"))
-				.setBinding(v -> DlssConfig.customScale = DlssConfig.clampScale(v / 100.0F), () -> Math.round(DlssConfig.customScale * 100.0F))
+				.setBinding(v -> DlssConfig.customScale = DlssConfig.clampScale(v / 100.0F),
+					() -> Math.round(Math.max(DlssConfig.customScale, DlssConfig.minCustomScale(DlssConfig.upscaler)) * 100.0F))
 				.setImpact(OptionImpact.HIGH)
 				.setStorageHandler(DlssConfig::save)
-				.setEnabled(vulkan))
+				.setEnabledProvider(state -> vulkan && state.readEnumOption(id("quality"), DlssConfig.Quality.class) == DlssConfig.Quality.CUSTOM,
+					id("quality")))
 			.addOption(builder.createEnumOption(id("preset"), DlssConfig.Preset.class)
 				.setName(Component.literal("DLSS Preset"))
 				.setTooltip(preset -> tip(preset.description()))
-				.setElementNameProvider(preset -> Component.literal(preset.displayName()))
+				.setElementNameProvider(preset -> Component.literal(preset == DlssConfig.Preset.AUTO && vulkan
+					&& WorldUpscaler.isUpscalerSupported(DlssConfig.Upscaler.DLSS) ? "Auto (" + WorldUpscaler.autoPreset().name() + ")"
+					: preset.displayName()))
 				.setDefaultValue(DlssConfig.Preset.AUTO)
 				.setBinding(v -> DlssConfig.preset = v, () -> DlssConfig.preset)
 				.setImpact(OptionImpact.LOW)
 				.setStorageHandler(DlssConfig::save)
-				.setEnabled(vulkan));
+				.setEnabledProvider(state -> vulkan && upscalerIs(state, DlssConfig.Upscaler.DLSS), id("upscaler")))
+			.addOption(builder.createIntegerOption(id("fsr_sharpness"))
+				.setName(Component.literal("FSR Sharpness"))
+				.setTooltip(tip("Sharpens FSR's image. Lower it if edges look harsh."))
+				.setDefaultValue(100)
+				.setRange(new Range(0, 100, 5))
+				.setValueFormatter(v -> Component.literal(v == 0 ? "Off" : v + "%"))
+				.setBinding(v -> DlssConfig.fsrSharpness = v / 100.0F, () -> Math.round(DlssConfig.fsrSharpness * 100.0F))
+				.setImpact(OptionImpact.LOW)
+				.setStorageHandler(DlssConfig::save)
+				.setEnabledProvider(state -> vulkan && upscalerIs(state, DlssConfig.Upscaler.FSR), id("upscaler")));
 
 		// Independent of upscaling: frame generation makes its own motion vectors when DLSS is off.
 		OptionGroupBuilder frames = builder.createOptionGroup()
 			.setName(Component.literal("Frame Generation & Latency"))
-			.addOption(builder.createBooleanOption(id("frame_generation"))
+			.addOption(builder.createEnumOption(id("frame_generation"), DlssConfig.FrameGeneration.class)
 				.setName(Component.literal("Frame Generation"))
-				.setTooltip(tip("NVIDIA DLSS Frame Generation: shows an AI-generated frame between every two rendered frames, "
-					+ "nearly doubling the frame rate you see (adds a little input latency). Needs an RTX 40 or 50 series GPU. Works "
-					+ "with DLSS upscaling on or off (not with the Bilinear upscaler). Works best without VSync or with a frame "
-					+ "rate limit at half your refresh rate. Pair it with Reflex to keep the input latency down."
-					+ (vulkan && !WorldUpscaler.isFrameGenAvailable() ? "\n\nUnavailable on this GPU or driver." : "")))
-				.setDefaultValue(false)
+				.setTooltip(backend -> tip(backend.description() + (backend == DlssConfig.FrameGeneration.OFF ? ""
+					: "\n\nAdds a generated frame between real ones for smoother motion. Adds a little input lag; use with Reflex.")
+					+ (generators.contains(backend) ? "" : "\n\nNot available: " + WorldUpscaler.frameGenUnavailableReason(backend) + ".")))
+				.setElementNameProvider(backend -> crossedOutUnless(generators.contains(backend), backend.displayName()))
+				.setDefaultValue(DlssConfig.FrameGeneration.OFF)
 				.setBinding(v -> DlssConfig.frameGeneration = v, () -> DlssConfig.frameGeneration)
 				.setImpact(OptionImpact.MEDIUM)
 				.setStorageHandler(DlssConfig::save)
-				.setEnabled(vulkan && WorldUpscaler.isFrameGenAvailable()))
+				.setEnabled(vulkan))
 			.addOption(builder.createEnumOption(id("reflex"), DlssConfig.Reflex.class)
 				.setName(Component.literal("NVIDIA Reflex"))
 				.setTooltip(mode -> tip(mode.description() + (vulkan && !Reflex.isSupported()
-					? "\n\nUnavailable: the graphics driver doesn't offer VK_NV_low_latency2." : "")))
+					? "\n\nNot available: not supported by your graphics driver." : "")))
 				.setElementNameProvider(mode -> Component.literal(mode.displayName()))
 				.setDefaultValue(DlssConfig.Reflex.ON)
 				.setBinding(v -> {
@@ -122,24 +151,21 @@ public final class SodiumOptions implements ConfigEntryPoint {
 			.setName(Component.literal("Advanced"))
 			.addOption(builder.createBooleanOption(id("texture_lod_correction"))
 				.setName(Component.literal("Texture LOD Correction"))
-				.setTooltip(tip("Keeps block textures as detailed as at full resolution while DLSS upscales. "
-					+ "Turn off only if textures shimmer. Changing it briefly reloads the shader pack."))
+				.setTooltip(tip("Keeps textures sharp while upscaling. Turn off if textures shimmer."))
 				.setDefaultValue(true)
 				.setBinding(v -> DlssConfig.textureLodCorrection = v, () -> DlssConfig.textureLodCorrection)
 				.setStorageHandler(DlssConfig::save)
 				.setEnabled(vulkan))
 			.addOption(builder.createBooleanOption(id("still_pack_foliage"))
 				.setName(Component.literal("Still Shader Pack Foliage"))
-				.setTooltip(tip("Stops shader packs' waving plants, leaves and water while DLSS runs. DLSS can't follow that "
-					+ "movement, so waving foliage can smear. Changing it briefly reloads the shader pack."))
+				.setTooltip(tip("Stops shader pack plants and water from waving, which can smear when upscaling."))
 				.setDefaultValue(false)
 				.setBinding(v -> DlssConfig.stillPackFoliage = v, () -> DlssConfig.stillPackFoliage)
 				.setStorageHandler(DlssConfig::save)
 				.setEnabled(vulkan))
 			.addOption(builder.createBooleanOption(id("ngx_logging"))
-				.setName(Component.literal("NVIDIA NGX Logs"))
-				.setTooltip(tip("Writes NVIDIA's DLSS logs to the dlssmc folder in the game directory, for troubleshooting. "
-					+ "Takes effect after a restart."))
+				.setName(Component.literal("Upscaler Logs"))
+				.setTooltip(tip("Saves upscaler logs to the dlssmc folder, for troubleshooting. Slightly slower. Takes effect after a restart."))
 				.setDefaultValue(false)
 				.setBinding(v -> DlssConfig.ngxLogging = v, () -> DlssConfig.ngxLogging)
 				.setStorageHandler(DlssConfig::save)
@@ -151,8 +177,7 @@ public final class SodiumOptions implements ConfigEntryPoint {
 				.setName(Component.literal("Graphics Backend"))
 				.addOption(builder.createExternalButtonOption(id("switch_to_vulkan"))
 					.setName(Component.literal("Switch to Vulkan"))
-					.setTooltip(Component.literal("DLSS only works with Minecraft's Vulkan graphics backend, and the game is running "
-						+ "on OpenGL. Click to switch to Vulkan; the game closes so it can start with Vulkan."))
+					.setTooltip(Component.literal("Upscaling needs Vulkan. Click to switch; the game will close."))
 					.setScreenConsumer(SodiumOptions::confirmSwitchToVulkan)));
 		}
 		builder.registerOwnModOptions()
@@ -162,6 +187,21 @@ public final class SodiumOptions implements ConfigEntryPoint {
 				.addOptionGroup(upscaling)
 				.addOptionGroup(frames)
 				.addOptionGroup(advanced));
+	}
+
+	/** The world's render resolution at this scale, e.g. "2293 x 933" (same rounding as WorldUpscaler.scaled). */
+	private static String renderResolution(float scale) {
+		var target = Minecraft.getInstance().gameRenderer.mainRenderTarget();
+		return Math.max(1, Math.round(target.width * scale)) + " x " + Math.max(1, Math.round(target.height * scale));
+	}
+
+	private static boolean upscalerIs(ConfigState state, DlssConfig.Upscaler upscaler) {
+		return state.readEnumOption(id("upscaler"), DlssConfig.Upscaler.class) == upscaler;
+	}
+
+	/** A choice this GPU can't run: crossed out and grayed (still selectable; it then reports itself unavailable). */
+	private static Component crossedOutUnless(boolean available, String name) {
+		return available ? Component.literal(name) : Component.literal(name).withStyle(ChatFormatting.STRIKETHROUGH, ChatFormatting.DARK_GRAY);
 	}
 
 	/** Offers to set the game's Graphics API option to Vulkan and close the game, since it only applies on the next start. */
@@ -174,7 +214,7 @@ public final class SodiumOptions implements ConfigEntryPoint {
 				minecraft.gui.setScreen(parent);
 			}
 		}, Component.literal("Switch to Vulkan?"),
-			Component.literal("DLSS cannot run when using OpenGL. Would you like to switch to Vulkan?\nThis will close your game."),
+			Component.literal("Upscaling needs Vulkan. Switch to Vulkan?\nThis will close your game."),
 			Component.literal("Switch"), CommonComponents.GUI_BACK));
 	}
 

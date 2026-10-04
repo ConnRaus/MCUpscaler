@@ -27,14 +27,20 @@ struct Frame {
     uint32_t preset;        // 336 NVSDK_NGX_DLSS_Hint_Render_Preset (0 = DLSS default for the mode)
     uint32_t zZeroToOne;    // 340 depth range of the projection
     float frameTimeMs;      // 344
-    uint32_t upscale;       // 348 1: DLSS Super Resolution; 0: only motion vectors and depth (for Frame Generation)
+    uint32_t upscaler;      // 348 UPSCALER_*: 0 only motion vectors and depth (for Frame Generation)
     uint64_t boxes;         // 352 moving entities: boxCount x {min, max, delta} float4s relative to the camera (or 0)
     uint32_t boxCount;      // 360
-    uint32_t vignette;      // 364 shader pack vignette drawn after DLSS (PackVignette.*, 0 = none)
+    uint32_t vignette;      // 364 shader pack vignette drawn after upscaling (PackVignette.*, 0 = none)
     float vignetteA;        // 368 its settings
     float vignetteB;        // 372
+    float sharpness;        // 376 FSR's sharpening, 0..1 (0 = off)
+    float fovY;             // 380 vertical field of view, radians
+    float nearZ;            // 384 near plane
+    uint32_t pad;           // 388
 };
-static_assert(sizeof(Frame) == 376, "Frame layout");
+static_assert(sizeof(Frame) == 392, "Frame layout");
+
+enum Upscaler : uint32_t { UPSCALER_NONE = 0, UPSCALER_DLSS = 1, UPSCALER_FSR = 2 };
 
 // Push constants of the motion vector pass (std430). Must match the GLSL in Shaders.java.
 struct MotionPush {
@@ -52,7 +58,7 @@ static_assert(sizeof(MotionPush) == 200, "MotionPush layout");
 // ------------------------------------------------------------------------------------------------ GPU timing
 
 // Timestamps around this file's per-frame work, read back a few frames later (never waits for the GPU).
-// Per frame: 0 start, 1 after the motion vectors, 2 after DLSS, 3 after the copy into Minecraft's target.
+// Per frame: 0 start, 1 after the motion vectors, 2 after DLSS or FSR, 3 after the copy into Minecraft's target.
 static constexpr uint32_t kTimingFrames = 4, kStampsPerFrame = 4;
 static VkQueryPool gQueryPool;
 static double gTimestampPeriodNs;
@@ -103,7 +109,7 @@ static void stamp(VkCommandBuffer cb, uint32_t index) {
     }
 }
 
-// Smoothed GPU milliseconds of the motion vector pass, the DLSS evaluate and the copy into Minecraft's target.
+// Smoothed GPU milliseconds of the motion vector pass, the DLSS evaluate / FSR dispatch and the copy into Minecraft's target.
 EXPORT int dlss_gpu_times(float *out) {
     for (int i = 0; i < 3; i++) out[i] = gGpuTimes[i];
     return gQueryPool ? 1 : 0;
@@ -190,14 +196,26 @@ static void copyToTarget(VkCommandBuffer cb, const OwnedImage &src, const Tex &d
     copyImage(cb, src.image, src.format, (VkImage)dst.image, (VkFormat)dst.format, dst.width, dst.height);
 }
 
-// Records the motion vector pass into commandBuffer and, with f->upscale, DLSS Super Resolution writing into f->output.
-// Without upscaling (Frame Generation at the native resolution) only the motion vectors and depth are made, and the world
-// image is kept as Frame Generation's hudless image.
-// Returns 1 on success, 0 if this frame failed (see dlss_last_error), -1 if DLSS is unusable.
+static int evaluateDlss(VkCommandBuffer cb, const Frame &frame, VkFormat outFormat);
+static int evaluateFsr(VkCommandBuffer cb, const Frame &f);
+
+// Records the motion vector pass into commandBuffer and, with f->upscaler, DLSS Super Resolution or FSR writing into
+// f->output. Without upscaling (Frame Generation at the native resolution) only the motion vectors and depth are made,
+// and the world image is kept as Frame Generation's hudless image.
+// Returns 1 on success, 0 if this frame failed (see dlss_last_error), -1 if the upscaler is unusable.
 EXPORT int dlss_upscale(uint64_t commandBuffer, const Frame *f) {
-    bool upscale = f->upscale != 0;
-    if (!gNgxReady || !gPassesReady || (upscale && !gDlssAvailable)) {
+    uint32_t upscaler = f->upscaler;
+    bool upscale = upscaler != UPSCALER_NONE;
+    if (!gPassesReady) {
+        setError("shaders not loaded");
+        return -1;
+    }
+    if (upscaler == UPSCALER_DLSS && !(gNgxReady && gDlssAvailable)) {
         setError("DLSS not initialised");
+        return -1;
+    }
+    if (upscaler == UPSCALER_FSR && !gFfxReady) {
+        setError("FSR unavailable (amd_fidelityfx_vk.dll not loaded)");
         return -1;
     }
     VkCommandBuffer cb = (VkCommandBuffer)commandBuffer;
@@ -218,7 +236,7 @@ EXPORT int dlss_upscale(uint64_t commandBuffer, const Frame *f) {
         || !ensureImage(gBiasMask, VK_FORMAT_R8_UNORM, inW, inH, sampledStorage, "DLSS current-colour bias mask")
         || !ensureImage(gOutput, outFormat, outW, outH, sampledStorage | transfer, "DLSS output")
         || (upscale && f->vignette && !ensureImage(gPost, outFormat, outW, outH, sampledStorage | transfer, "vignetted output"))
-        || (upscale && !ensureImage(gExposure, VK_FORMAT_R32_SFLOAT, 1, 1, VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT, "DLSS exposure"))
+        || (upscaler == UPSCALER_DLSS && !ensureImage(gExposure, VK_FORMAT_R32_SFLOAT, 1, 1, VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT, "DLSS exposure"))
         || !ensureBuffer(gBoxBuffer, kMaxBoxes * 48)) {
         return 0;
     }
@@ -269,11 +287,34 @@ EXPORT int dlss_upscale(uint64_t commandBuffer, const Frame *f) {
         return 1;
     }
 
-    if (!ensureDlss(cb, *f, outFormat)) {
-        stamp(cb, 2);
+    int result = upscaler == UPSCALER_FSR ? evaluateFsr(cb, *f) : evaluateDlss(cb, *f, outFormat);
+    globalBarrier(cb);
+    stamp(cb, 2);
+    if (result <= 0) {
         stamp(cb, 3);
-        return -1;
+        return result;
     }
+    if (f->vignette) {
+        Resource postRes[2] = {{gOutput.view}, {gPost.view}};
+        struct { uint32_t kind; float a, b; } post = {f->vignette, f->vignetteA, f->vignetteB};
+        dispatch(cb, PASS_POST, postRes, &post, sizeof(post), outW, outH);
+        globalBarrier(cb);
+        copyToTarget(cb, gPost, f->output);
+        gLastOutput = &gPost;
+    } else {
+        copyToTarget(cb, gOutput, f->output);
+        gLastOutput = &gOutput;
+    }
+    globalBarrier(cb);
+    stamp(cb, 3);
+    return 1;
+}
+
+// DLSS Super Resolution from f's colour and this frame's depth and motion vectors into gOutput.
+static int evaluateDlss(VkCommandBuffer cb, const Frame &frame, VkFormat outFormat) {
+    const Frame *f = &frame;
+    uint32_t inW = f->color.width, inH = f->color.height, outW = f->output.width, outH = f->output.height;
+    if (!ensureDlss(cb, *f, outFormat)) return -1;
     NVSDK_NGX_Resource_VK color = resourceOf(f->color.image, f->color.view, (VkFormat)f->color.format, inW, inH, false);
     NVSDK_NGX_Resource_VK depth = resourceOf((uint64_t)gDlssDepth.image, (uint64_t)gDlssDepth.view, gDlssDepth.format, inW, inH, true);
     NVSDK_NGX_Resource_VK motion = resourceOf((uint64_t)gMotion.image, (uint64_t)gMotion.view, gMotion.format, inW, inH, true);
@@ -299,27 +340,33 @@ EXPORT int dlss_upscale(uint64_t commandBuffer, const Frame *f) {
     // Animated entities (legs, heads, turning) have no motion vectors of their own: DLSS leans on the current frame there.
     eval.pInBiasCurrentColorMask = &biasMask;
     NVSDK_NGX_Result r = NGX_VULKAN_EVALUATE_DLSS_EXT(cb, gDlss, gParams, &eval);
-    globalBarrier(cb);
-    stamp(cb, 2);
     if (NVSDK_NGX_FAILED(r)) {
         setError("DLSS evaluate failed: 0x%08x", r);
-        stamp(cb, 3);
         return 0;
     }
-    if (f->vignette) {
-        Resource postRes[2] = {{gOutput.view}, {gPost.view}};
-        struct { uint32_t kind; float a, b; } post = {f->vignette, f->vignetteA, f->vignetteB};
-        dispatch(cb, PASS_POST, postRes, &post, sizeof(post), outW, outH);
-        globalBarrier(cb);
-        copyToTarget(cb, gPost, f->output);
-        gLastOutput = &gPost;
-    } else {
-        copyToTarget(cb, gOutput, f->output);
-        gLastOutput = &gOutput;
-    }
-    globalBarrier(cb);
-    stamp(cb, 3);
     return 1;
+}
+
+// FSR upscaling from f's colour and this frame's depth and motion vectors into gOutput. The current-colour bias mask
+// (animated entities) is FSR's reactive mask: both mean "trust this frame more here".
+static int evaluateFsr(VkCommandBuffer cb, const Frame &f) {
+    FsrUpscale u{};
+    u.color = (VkImage)f.color.image;
+    u.colorFormat = (VkFormat)f.color.format;
+    u.renderW = f.color.width;
+    u.renderH = f.color.height;
+    u.depth = &gDlssDepth;
+    u.motion = &gMotion;
+    u.reactive = &gBiasMask;
+    u.output = &gOutput;
+    u.jitterX = f.jitterX;
+    u.jitterY = f.jitterY;
+    u.frameTimeMs = f.frameTimeMs;
+    u.sharpness = f.sharpness;
+    u.fovY = f.fovY;
+    u.nearZ = f.nearZ;
+    u.reset = f.reset != 0;
+    return fsrUpscale(cb, u);
 }
 
 // ------------------------------------------------------------------------------------------------ depth merges

@@ -27,7 +27,8 @@ static VkInstance gInstance;
 VkPhysicalDevice gPhysical;
 VkDevice gDevice;
 static PFN_vkGetInstanceProcAddr gGipa;
-static PFN_vkGetDeviceProcAddr gGdpa;
+PFN_vkGetDeviceProcAddr gGdpa;
+bool gLogging;
 
 #define DEFINE(name) PFN_##name p_##name;
 VK_FUNCS(DEFINE)
@@ -322,8 +323,11 @@ static NVSDK_NGX_Parameter *gCaps;
 NVSDK_NGX_Parameter *gParams;
 bool gPassesReady;
 
+static bool gInitialized;
+
 // Returns a bitmask: 1 = NGX initialised, 2 = DLSS Super Resolution available, 4 = DLSS Frame Generation available,
-// or -1 on failure (see dlss_last_error).
+// 8 = AMD FidelityFX (FSR) available; or -1 on failure (see dlss_last_error). Without NGX (not an NVIDIA RTX GPU) the
+// bridge still works for FSR; dlss_last_error then says why NGX is missing.
 EXPORT int dlss_init(uint64_t instance, uint64_t physicalDevice, uint64_t device, uint64_t gipa, uint64_t gdpa,
                      const wchar_t *featureDir, const wchar_t *dataDir, int logging) {
     gInstance = (VkInstance)instance;
@@ -331,7 +335,11 @@ EXPORT int dlss_init(uint64_t instance, uint64_t physicalDevice, uint64_t device
     gDevice = (VkDevice)device;
     gGipa = (PFN_vkGetInstanceProcAddr)gipa;
     gGdpa = (PFN_vkGetDeviceProcAddr)gdpa;
+    gLogging = logging != 0;
     if (!loadVulkan()) return -1;
+    gInitialized = true;
+    initTiming();
+    int ffx = fsrLoad(featureDir) ? 8 : 0;
 
     const wchar_t *paths[] = {featureDir};
     NVSDK_NGX_FeatureCommonInfo common{};
@@ -342,14 +350,13 @@ EXPORT int dlss_init(uint64_t instance, uint64_t physicalDevice, uint64_t device
         gInstance, gPhysical, gDevice, gGipa, gGdpa, &common);
     if (NVSDK_NGX_FAILED(r)) {
         setError("NVSDK_NGX_VULKAN_Init failed: 0x%08x (not an NVIDIA RTX GPU, or the driver is too old)", r);
-        return -1;
+        return ffx;
     }
     gNgxReady = true;
-    initTiming();
     r = NVSDK_NGX_VULKAN_GetCapabilityParameters(&gCaps);
     if (NVSDK_NGX_FAILED(r)) {
         setError("NVSDK_NGX_VULKAN_GetCapabilityParameters failed: 0x%08x", r);
-        return 1;
+        return 1 | ffx;
     }
     NVSDK_NGX_VULKAN_AllocateParameters(&gParams);
     int ss = 0, ssNeedsDriver = 0, fg = 0;
@@ -364,7 +371,23 @@ EXPORT int dlss_init(uint64_t instance, uint64_t physicalDevice, uint64_t device
         NVSDK_NGX_Parameter_GetI(gCaps, NVSDK_NGX_Parameter_SuperSampling_FeatureInitResult, &result);
         setError("DLSS Super Resolution unavailable (init result 0x%08x%s)", result, ssNeedsDriver ? ", needs a newer driver" : "");
     }
-    return 1 | (gDlssAvailable ? 2 : 0) | (gFrameGenAvailable ? 4 : 0);
+    return 1 | (gDlssAvailable ? 2 : 0) | (gFrameGenAvailable ? 4 : 0) | ffx;
+}
+
+// FSR's version ("3.1.4"), known once FSR upscaling has run; returns its length.
+EXPORT int dlss_fsr_version(char *buf, int len) {
+    if (len <= 0) return 0;
+    strncpy_s(buf, (size_t)len, fsrVersion(), _TRUNCATE);
+    return (int)strlen(buf);
+}
+
+// DLSS's render size range for an output size and quality mode: out = {optimal w, h, max w, h, min w, h}. 1 = ok.
+EXPORT int dlss_optimal_settings(int quality, int outW, int outH, uint32_t *out) {
+    if (!gNgxReady || !gCaps) return 0;
+    float sharpness = 0.0f;
+    NVSDK_NGX_Result r = NGX_DLSS_GET_OPTIMAL_SETTINGS(gCaps, (unsigned)outW, (unsigned)outH, (NVSDK_NGX_PerfQuality_Value)quality,
+        &out[0], &out[1], &out[2], &out[3], &out[4], &out[5], &sharpness);
+    return NVSDK_NGX_SUCCEED(r) ? 1 : 0;
 }
 
 EXPORT int dlss_frame_gen_max_multi_frame(void) {
@@ -400,9 +423,11 @@ NVSDK_NGX_Resource_VK resourceOf(uint64_t image, uint64_t view, VkFormat format,
 // ------------------------------------------------------------------------------------------------ shutdown
 
 EXPORT void dlss_shutdown(void) {
-    if (!gNgxReady) return;
+    if (!gInitialized) return;
+    gInitialized = false;
     fgShutdown();
     deviceWaitIdle();
+    fsrShutdown(true);
     srShutdown();
     for (ComputePass &pass : gPasses) {
         if (pass.pipeline) p_vkDestroyPipeline(gDevice, pass.pipeline, nullptr);
@@ -413,6 +438,7 @@ EXPORT void dlss_shutdown(void) {
     if (gPointSampler) p_vkDestroySampler(gDevice, gPointSampler, nullptr);
     gPointSampler = VK_NULL_HANDLE;
     gPassesReady = false;
+    if (!gNgxReady) return;
     if (gParams) NVSDK_NGX_VULKAN_DestroyParameters(gParams);
     if (gCaps) NVSDK_NGX_VULKAN_DestroyParameters(gCaps);
     gParams = gCaps = nullptr;

@@ -17,9 +17,10 @@ import org.lwjgl.vulkan.VK12;
 import org.lwjgl.vulkan.VkCommandBuffer;
 
 /**
- * DLSS Frame Generation. While it runs, the native present thread owns Minecraft's swapchain: Minecraft's own acquire,
- * blit and present are replaced (see VulkanGpuSurfaceMixin) by copying the finished frame into the native ring, where
- * DLSS-G generates the frame between it and the previous one, and handing both to the present thread.
+ * Frame generation (NVIDIA DLSS-G or AMD FSR 3.1). While it runs, the native present thread owns Minecraft's swapchain:
+ * Minecraft's own acquire, blit and present are replaced (see VulkanGpuSurfaceMixin) by copying the finished frame into the
+ * native ring, where the selected generator makes the frame between it and the previous one, and handing both to the
+ * present thread.
  */
 public final class FrameGen {
 	/** VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT. */
@@ -67,7 +68,8 @@ public final class FrameGen {
 	private static int presentQueueIndex = -1;
 
 	private static boolean running;
-	private static boolean startFailed;
+	/** The generator that failed to start (not retried until another one is picked), or null. */
+	private static DlssConfig.@Nullable FrameGeneration startFailed;
 	private static long pendingFrame;
 	private static boolean pendingInterpolated;
 	private static int loggedErrors;
@@ -95,7 +97,9 @@ public final class FrameGen {
 
 	/** Independent of upscaling: without it, the motion vectors and depth are made at the native resolution. */
 	private static boolean wanted() {
-		return DlssConfig.frameGeneration && WorldUpscaler.isFrameGenAvailable() && WorldUpscaler.hasFrameGenInputs() && !startFailed;
+		DlssConfig.FrameGeneration backend = DlssConfig.frameGeneration;
+		return backend != DlssConfig.FrameGeneration.OFF && WorldUpscaler.isFrameGenAvailable(backend) && WorldUpscaler.hasFrameGenInputs()
+			&& startFailed != backend;
 	}
 
 	/**
@@ -135,11 +139,12 @@ public final class FrameGen {
 		running = DlssNative.fgStart(surface.dlssmc$presentQueue(), presentFamily, graphicsFamily, swapchain, surface.dlssmc$swapchainFormat(),
 			surface.dlssmc$swapchainImages(), surface.dlssmc$width(), surface.dlssmc$height());
 		if (running) {
-			DlssMod.LOGGER.info("DLSS Frame Generation on ({}x{}, {}, presenting on {} queue)", surface.dlssmc$width(), surface.dlssmc$height(),
-				surface.dlssmc$fifo() ? "vsync" : "no vsync", surface.dlssmc$hasOwnPresentQueue() ? "its own" : "Minecraft's");
+			DlssMod.LOGGER.info("{} Frame Generation on ({}x{}, {}, presenting on {} queue)", DlssConfig.frameGeneration.displayName(),
+				surface.dlssmc$width(), surface.dlssmc$height(), surface.dlssmc$fifo() ? "vsync" : "no vsync",
+				surface.dlssmc$hasOwnPresentQueue() ? "its own" : "Minecraft's");
 		} else {
-			startFailed = true;
-			DlssMod.LOGGER.error("DLSS Frame Generation could not start: {}", DlssNative.lastError());
+			startFailed = DlssConfig.frameGeneration;
+			DlssMod.LOGGER.error("{} Frame Generation could not start: {}", DlssConfig.frameGeneration.displayName(), DlssNative.lastError());
 		}
 	}
 
@@ -160,7 +165,7 @@ public final class FrameGen {
 		}
 	}
 
-	/** Instead of Minecraft's blit to the swapchain: records the copy into the ring and DLSS-G. */
+	/** Instead of Minecraft's blit to the swapchain: records the copy into the ring and the frame generator. */
 	public static void blit(VulkanCommandEncoder encoder, GpuTextureView view) {
 		pendingFrame = 0L;
 		if (!DlssNative.writeTex(finalTex, 0, view.texture(), view)) {
@@ -169,11 +174,11 @@ public final class FrameGen {
 		Minecraft mc = Minecraft.getInstance();
 		boolean notGame = mc.gui.screen() != null || mc.level == null || mc.isPaused();
 		VkCommandBuffer cb = encoder.allocateAndBeginTransientCommandBuffer();
-		boolean ok = DlssNative.fgRecord(cb.address(), finalTex, true, notGame, submit);
+		boolean ok = DlssNative.fgRecord(cb.address(), finalTex, DlssConfig.frameGeneration.nativeCode(), notGame, submit);
 		VK12.vkEndCommandBuffer(cb);
 		if (!ok) {
 			if (loggedErrors++ < 10) {
-				DlssMod.LOGGER.warn("DLSS Frame Generation skipped a frame: {}", DlssNative.lastError());
+				DlssMod.LOGGER.warn("{} Frame Generation skipped a frame: {}", DlssConfig.frameGeneration.displayName(), DlssNative.lastError());
 			}
 			encoder.execute(cb);
 			return;
@@ -210,7 +215,7 @@ public final class FrameGen {
 	}
 
 	/**
-	 * The frame's camera for DLSS-G, after its motion vectors were made: projection without jitter, view rotation, the previous
+	 * The frame's camera for frame generation, after its motion vectors were made: projection without jitter, view rotation, the previous
 	 * frame's projection * rotation, and the camera movement since then (matrices relative to the camera position).
 	 */
 	public static void writeCamera(Matrix4fc projection, Matrix4fc viewRotation, Matrix4fc viewProj, Matrix4fc prevViewProj, Vec3 camDelta,
@@ -271,7 +276,8 @@ public final class FrameGen {
 			return null;
 		}
 		float[] times = DlssNative.fgPresentTimes();
-		return String.format(Locale.ROOT, "Frame generation: %d rendered + %d generated fps (frame interval %.1f ms)",
-			shownRealFps, shownGeneratedFps, times == null ? 0.0F : times[2]);
+		// r = rendered fps, g = generated fps, t = total shown; fi = smoothed interval between rendered frames.
+		return String.format(Locale.ROOT, "Frame gen (%s): %dr/%dg/%dt (fi %.1f ms)", DlssConfig.frameGeneration.name(), shownRealFps,
+			shownGeneratedFps, shownRealFps + shownGeneratedFps, times == null ? 0.0F : times[2]);
 	}
 }

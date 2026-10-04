@@ -66,7 +66,7 @@ public class DlssScreenshotTest implements FabricClientGameTest {
 				String name = (String) mode[0];
 				if (mode[1] != null) {
 					configure(context, name, (boolean) mode[1], DlssConfig.Upscaler.DLSS, (DlssConfig.Quality) mode[2]);
-					context.runOnClient(mc -> DlssConfig.frameGeneration = false);
+					context.runOnClient(mc -> DlssConfig.frameGeneration = DlssConfig.FrameGeneration.OFF);
 				} else {
 					context.runOnClient(mc -> DlssMod.LOGGER.info("[test] user settings -> {}", DlssMod.statusLine()));
 				}
@@ -120,7 +120,7 @@ public class DlssScreenshotTest implements FabricClientGameTest {
 					DlssConfig.reflex = phase.contains("off") ? DlssConfig.Reflex.OFF : phase.contains("boost") ? DlssConfig.Reflex.BOOST
 						: DlssConfig.Reflex.ON;
 					dev.dlssmc.Reflex.settingsChanged();
-					DlssConfig.frameGeneration = phase.contains("fg");
+					DlssConfig.frameGeneration = phase.contains("fg") ? DlssConfig.FrameGeneration.DLSS : DlssConfig.FrameGeneration.OFF;
 				});
 				context.waitTicks(100);
 				context.runOnClient(mc -> {
@@ -129,7 +129,7 @@ public class DlssScreenshotTest implements FabricClientGameTest {
 						fg == null ? "frame generation not running" : fg);
 				});
 			}
-			context.runOnClient(mc -> DlssConfig.frameGeneration = false);
+			context.runOnClient(mc -> DlssConfig.frameGeneration = DlssConfig.FrameGeneration.OFF);
 		} finally {
 			startExitWatchdog();
 		}
@@ -207,6 +207,10 @@ public class DlssScreenshotTest implements FabricClientGameTest {
 				}
 				if (System.getenv("DLSS_FG") != null) {
 					frameGen(context);
+					return;
+				}
+				if (System.getenv("DLSS_FSR") != null) {
+					fsr(context);
 					return;
 				}
 				if (System.getenv("DLSS_MOBS") != null) {
@@ -347,7 +351,7 @@ public class DlssScreenshotTest implements FabricClientGameTest {
 		for (String phase : phases) {
 			context.runOnClient(mc -> {
 				DlssConfig.enabled = phase.startsWith("dlaa");
-				DlssConfig.frameGeneration = phase.contains(", on");
+				DlssConfig.frameGeneration = phase.contains(", on") ? DlssConfig.FrameGeneration.DLSS : DlssConfig.FrameGeneration.OFF;
 				mc.options.framerateLimit().set(phase.contains("60") ? 60 : 260);
 			});
 			context.waitTicks(100);
@@ -371,7 +375,44 @@ public class DlssScreenshotTest implements FabricClientGameTest {
 				DlssMod.LOGGER.info("[fg] {}: {} rendered fps; {}", phase, String.format("%.0f", 1000.0 / ms), fg == null ? "frame generation not running" : fg);
 			});
 		}
-		context.runOnClient(mc -> DlssConfig.frameGeneration = false);
+		context.runOnClient(mc -> DlssConfig.frameGeneration = DlssConfig.FrameGeneration.OFF);
+		context.waitTicks(20);
+	}
+
+	/** AMD FSR upscaling and frame generation (DLSS_FSR=1): stills, a turn, then FSR frame generation with and without upscaling. */
+	private static void fsr(ClientGameTestContext context) {
+		DlssConfig.Upscaler F = DlssConfig.Upscaler.FSR, D = DlssConfig.Upscaler.DLSS;
+		still(context, "f_native", false, F, DlssConfig.Quality.QUALITY);
+		still(context, "f_dlss_quality", true, D, DlssConfig.Quality.QUALITY);
+		still(context, "f_fsr_native_aa", true, F, DlssConfig.Quality.DLAA);
+		still(context, "f_fsr_quality", true, F, DlssConfig.Quality.QUALITY);
+		context.runOnClient(mc -> DlssConfig.fsrSharpness = 0.4F);
+		still(context, "f_fsr_quality_sharp40", true, F, DlssConfig.Quality.QUALITY);
+		context.runOnClient(mc -> DlssConfig.fsrSharpness = 0.0F);
+		still(context, "f_fsr_performance", true, F, DlssConfig.Quality.PERFORMANCE);
+		turn(context, "m_fsr_performance", true, F, DlssConfig.Quality.PERFORMANCE);
+		context.runOnClient(mc -> {
+			mc.options.enableVsync().set(false);
+			mc.options.framerateLimit().set(60);
+			DlssMod.LOGGER.info("[fsr] version {}", dev.dlssmc.DlssNative.fsrVersion());
+		});
+		String[] phases = {"fsr quality, fg off", "fsr quality, fsr fg", "native, fsr fg", "dlss quality, fsr fg", "fsr quality, dlss fg"};
+		for (String phase : phases) {
+			context.runOnClient(mc -> {
+				DlssConfig.enabled = !phase.startsWith("native");
+				DlssConfig.upscaler = phase.startsWith("dlss") ? D : F;
+				DlssConfig.quality = DlssConfig.Quality.QUALITY;
+				DlssConfig.frameGeneration = phase.endsWith("fsr fg") ? DlssConfig.FrameGeneration.FSR
+					: phase.endsWith("dlss fg") ? DlssConfig.FrameGeneration.DLSS : DlssConfig.FrameGeneration.OFF;
+			});
+			context.waitTicks(100);
+			context.runOnClient(mc -> {
+				String fg = dev.dlssmc.FrameGen.statusLine();
+				DlssMod.LOGGER.info("[fsr] {}: {} fps; {}; {}", phase, mc.getFps(), DlssMod.statusLine(),
+					fg == null ? "frame generation not running" : fg);
+			});
+		}
+		context.runOnClient(mc -> DlssConfig.frameGeneration = DlssConfig.FrameGeneration.OFF);
 		context.waitTicks(20);
 	}
 

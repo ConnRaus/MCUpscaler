@@ -21,6 +21,7 @@ import java.nio.file.StandardCopyOption;
 import java.util.Arrays;
 import java.util.Locale;
 import net.fabricmc.loader.api.FabricLoader;
+import org.jspecify.annotations.Nullable;
 
 /**
  * Java (FFM) bindings for the native bridge (src/native, see bridge.h). Handles and pointers are passed as plain 64-bit integers.
@@ -29,17 +30,20 @@ import net.fabricmc.loader.api.FabricLoader;
  */
 public final class DlssNative {
 	/** Bits of {@link #init}'s result. */
-	public static final int INIT_NGX = 1, INIT_SUPER_RESOLUTION = 2, INIT_FRAME_GENERATION = 4;
+	public static final int INIT_NGX = 1, INIT_SUPER_RESOLUTION = 2, INIT_FRAME_GENERATION = 4, INIT_FSR = 8;
+	/** Frame generators for {@link #fgRecord} (FgBackend in the bridge). */
+	public static final int FG_BACKEND_NONE = 0, FG_BACKEND_DLSS = 1, FG_BACKEND_FSR = 2;
 	/** Size of a texture description (struct Tex in the bridge). */
 	public static final long TEX_SIZE = 32;
 	/** Offsets in struct Frame. */
-	public static final long FRAME_SIZE = 376;
+	public static final long FRAME_SIZE = 392;
 	public static final long FRAME_COLOR = 0, FRAME_DEPTH = 32, FRAME_HAND = 64, FRAME_OUTPUT = 96;
 	public static final long FRAME_INV_VIEW_PROJ = 128, FRAME_PREV_VIEW_PROJ = 192, FRAME_CAM_DELTA = 256;
 	public static final long FRAME_OBJ_MIN = 272, FRAME_OBJ_MAX = 288, FRAME_OBJ_DELTA = 304;
 	public static final long FRAME_JITTER = 320, FRAME_RESET = 328, FRAME_QUALITY = 332, FRAME_PRESET = 336;
-	public static final long FRAME_Z_ZERO_TO_ONE = 340, FRAME_FRAME_TIME = 344, FRAME_UPSCALE = 348;
+	public static final long FRAME_Z_ZERO_TO_ONE = 340, FRAME_FRAME_TIME = 344, FRAME_UPSCALER = 348;
 	public static final long FRAME_BOXES = 352, FRAME_BOX_COUNT = 360, FRAME_VIGNETTE = 364;
+	public static final long FRAME_SHARPNESS = 376, FRAME_FOV = 380, FRAME_NEAR = 384;
 	/** Moving entities the motion vectors know about: {min, max, delta} float4s each. */
 	public static final int MAX_BOXES = 64, BOX_BYTES = 48;
 	/** Offsets in struct FgCamera (frame generation). */
@@ -51,7 +55,7 @@ public final class DlssNative {
 	public static final long FG_SUBMIT_SIZE = 40;
 	public static final long FG_READY_SEMAPHORE = 0, FG_READY_VALUE = 8, FG_PRESENTED_SEMAPHORE = 16, FG_PRESENTED_VALUE = 24, FG_INTERPOLATED = 32;
 
-	private static final String[] LIBRARIES = {"dlss_bridge.dll", "nvngx_dlss.dll", "nvngx_dlssg.dll"};
+	private static final String[] LIBRARIES = {"dlss_bridge.dll", "nvngx_dlss.dll", "nvngx_dlssg.dll", "amd_fidelityfx_vk.dll"};
 
 	private static MethodHandle init;
 	private static MethodHandle loadShaders;
@@ -71,13 +75,15 @@ public final class DlssNative {
 	private static MethodHandle fgRecord;
 	private static MethodHandle fgQueue;
 	private static MethodHandle fgPresentTimes;
+	private static MethodHandle fsrVersion;
+	private static MethodHandle optimalSettings;
 	private static boolean loaded;
 	private static boolean failed;
 	private static Path nativeDir;
 
 	private static final Arena ARENA = Arena.global();
 	private static final MemorySegment errorBuffer = ARENA.allocate(1024);
-	private static final MemorySegment scratch = ARENA.allocate(16, 8);
+	private static final MemorySegment scratch = ARENA.allocate(32, 8);
 
 	private DlssNative() {
 	}
@@ -119,6 +125,8 @@ public final class DlssNative {
 			fgRecord = linker.downcallHandle(lookup.findOrThrow("dlss_fg_record"), FunctionDescriptor.of(I, J, J, I, I, J));
 			fgQueue = linker.downcallHandle(lookup.findOrThrow("dlss_fg_queue"), FunctionDescriptor.ofVoid(J, I, J));
 			fgPresentTimes = linker.downcallHandle(lookup.findOrThrow("dlss_fg_present_times"), FunctionDescriptor.of(I, J));
+			fsrVersion = linker.downcallHandle(lookup.findOrThrow("dlss_fsr_version"), FunctionDescriptor.of(I, J, I));
+			optimalSettings = linker.downcallHandle(lookup.findOrThrow("dlss_optimal_settings"), FunctionDescriptor.of(I, I, I, I, J));
 			loaded = true;
 			return true;
 		} catch (IOException | RuntimeException e) {
@@ -218,9 +226,10 @@ public final class DlssNative {
 		}
 	}
 
-	public static boolean fgRecord(long commandBuffer, MemorySegment finalTex, boolean interpolate, boolean notGame, MemorySegment out) {
+	/** backend: FG_BACKEND_*, NONE = present the real frame only. */
+	public static boolean fgRecord(long commandBuffer, MemorySegment finalTex, int backend, boolean notGame, MemorySegment out) {
 		try {
-			return (int)fgRecord.invokeExact(commandBuffer, finalTex.address(), interpolate ? 1 : 0, notGame ? 1 : 0, out.address()) == 1;
+			return (int)fgRecord.invokeExact(commandBuffer, finalTex.address(), backend, notGame ? 1 : 0, out.address()) == 1;
 		} catch (Throwable t) {
 			throw new RuntimeException(t);
 		}
@@ -247,7 +256,36 @@ public final class DlssNative {
 		}
 	}
 
-	/** Bitmask: 1 = NGX initialised, 2 = DLSS Super Resolution available, 4 = DLSS Frame Generation available; -1 = failure. */
+	/** DLSS's render size range for an output size and NGX quality: {optimal w, h, max w, h, min w, h}, or null. */
+	public static int @Nullable [] optimalSettings(int quality, int outW, int outH) {
+		try {
+			if (!loaded || (int)optimalSettings.invokeExact(quality, outW, outH, scratch.address()) != 1) {
+				return null;
+			}
+			return scratch.asSlice(0, 24).toArray(ValueLayout.JAVA_INT);
+		} catch (Throwable t) {
+			throw new RuntimeException(t);
+		}
+	}
+
+	/** FSR's version ("3.1.4"), known once FSR upscaling has run; "" before. */
+	public static String fsrVersion() {
+		try {
+			if (!loaded) {
+				return "";
+			}
+			MemorySegment buf = errorBuffer;
+			int len = (int)fsrVersion.invokeExact(buf.address(), (int)buf.byteSize());
+			return len <= 0 ? "" : new String(buf.asSlice(0, len).toArray(ValueLayout.JAVA_BYTE), StandardCharsets.UTF_8);
+		} catch (Throwable t) {
+			throw new RuntimeException(t);
+		}
+	}
+
+	/**
+	 * Bitmask: 1 = NGX initialised, 2 = DLSS Super Resolution available, 4 = DLSS Frame Generation available, 8 = AMD FSR
+	 * loaded; -1 = failure.
+	 */
 	public static int init(long instance, long physicalDevice, long device, long gipa, long gdpa, boolean logging) {
 		try {
 			Path dataDir = nativeDir.getParent();
@@ -272,7 +310,7 @@ public final class DlssNative {
 		}
 	}
 
-	/** Motion vectors and depth, and DLSS if the frame says so (FRAME_UPSCALE). 1 = done, 0 = failed this frame, -1 = unusable. */
+	/** Motion vectors and depth, and DLSS or FSR if the frame says so (FRAME_UPSCALER). 1 = done, 0 = failed this frame, -1 = unusable. */
 	public static int upscale(long commandBuffer, MemorySegment frame) {
 		try {
 			return (int)upscale.invokeExact(commandBuffer, frame.address());

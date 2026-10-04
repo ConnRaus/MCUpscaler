@@ -59,7 +59,13 @@ public class DlssMod implements ClientModInitializer {
 			changed = true;
 		}
 		while (frameGenKey.consumeClick()) {
-			DlssConfig.frameGeneration = !DlssConfig.frameGeneration;
+			// Skips frame generators this GPU can't run.
+			DlssConfig.FrameGeneration[] all = DlssConfig.FrameGeneration.values();
+			DlssConfig.FrameGeneration next = DlssConfig.frameGeneration;
+			do {
+				next = all[(next.ordinal() + 1) % all.length];
+			} while (next != DlssConfig.FrameGeneration.OFF && !WorldUpscaler.isFrameGenAvailable(next));
+			DlssConfig.frameGeneration = next;
 			changed = true;
 		}
 		if (changed) {
@@ -79,26 +85,28 @@ public class DlssMod implements ClientModInitializer {
 	}
 
 	private static String frameGenStatus() {
-		if (!DlssConfig.frameGeneration) {
+		DlssConfig.FrameGeneration backend = DlssConfig.frameGeneration;
+		if (backend == DlssConfig.FrameGeneration.OFF) {
 			return "off";
 		}
-		if (!WorldUpscaler.isFrameGenAvailable()) {
-			return "unavailable";
+		if (!WorldUpscaler.isFrameGenAvailable(backend)) {
+			return backend.displayName() + " unavailable";
 		}
-		return WorldUpscaler.hasFrameGenInputs() ? "on" : "off (not with Bilinear)";
+		return WorldUpscaler.hasFrameGenInputs() ? backend.displayName() : "off (not with Bilinear)";
 	}
 
 	private static String upscalingStatus() {
 		if (!DlssConfig.enabled) {
-			return "DLSS: off (native resolution)";
+			return "Upscaling: off (native resolution)";
 		}
-		String mode = DlssConfig.upscaler == DlssConfig.Upscaler.DLSS && !WorldUpscaler.isDlssReady()
-			? "Bilinear (DLSS unavailable: " + WorldUpscaler.unavailableReason() + ")"
-			: DlssConfig.upscaler.displayName();
+		DlssConfig.Upscaler upscaler = DlssConfig.upscaler;
+		String mode = !WorldUpscaler.isUpscalerReady(upscaler)
+			? "Bilinear (" + upscaler.displayName() + " unavailable: " + WorldUpscaler.unavailableReason(upscaler) + ")"
+			: upscaler.displayName();
 		String quality = DlssConfig.quality == DlssConfig.Quality.CUSTOM
 			? String.format(Locale.ROOT, "Custom %d%%", Math.round(DlssConfig.renderScale() * 100))
 			: DlssConfig.quality.displayName();
-		String preset = DlssConfig.upscaler == DlssConfig.Upscaler.DLSS ? ", preset " + DlssConfig.preset.displayName() : "";
-		return "DLSS: " + mode + " " + quality + preset;
+		String preset = DlssConfig.upscaler == DlssConfig.Upscaler.DLSS ? ", preset " + WorldUpscaler.presetName() : "";
+		return "Upscaling: " + mode + " " + quality + preset;
 	}
 }
