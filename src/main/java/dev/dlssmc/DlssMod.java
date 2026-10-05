@@ -1,7 +1,6 @@
 package dev.dlssmc;
 
 import com.mojang.blaze3d.platform.InputConstants;
-import java.util.Locale;
 import net.fabricmc.api.ClientModInitializer;
 import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
 import net.fabricmc.fabric.api.client.keymapping.v1.KeyMappingHelper;
@@ -103,9 +102,7 @@ public class DlssMod implements ClientModInitializer {
 		String mode = !WorldUpscaler.isUpscalerReady(upscaler)
 			? "Bilinear (" + upscaler.displayName() + " unavailable: " + WorldUpscaler.unavailableReason(upscaler) + ")"
 			: upscaler.displayName();
-		String quality = DlssConfig.quality == DlssConfig.Quality.CUSTOM
-			? String.format(Locale.ROOT, "Custom %d%%", Math.round(DlssConfig.renderScale() * 100))
-			: DlssConfig.quality.displayName();
+		String quality = DlssConfig.qualityName();
 		String preset = DlssConfig.upscaler == DlssConfig.Upscaler.DLSS ? ", preset " + WorldUpscaler.presetName() : "";
 		return "Upscaling: " + mode + " " + quality + preset;
 	}

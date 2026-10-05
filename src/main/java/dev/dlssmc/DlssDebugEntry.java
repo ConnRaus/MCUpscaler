@@ -53,7 +53,7 @@ public class DlssDebugEntry implements DebugScreenEntry {
 		} else {
 			DlssConfig.Upscaler upscaler = DlssConfig.upscaler;
 			boolean temporal = upscaler.temporal() && WorldUpscaler.isUpscalerReady(upscaler);
-			String quality = DlssConfig.quality.displayName().replaceAll(" \\(.*", "");
+			String quality = DlssConfig.qualityName().replaceAll(" \\(\\d+%\\)", "");
 			String name = upscaler == DlssConfig.Upscaler.FSR ? fsrName() : "DLSS";
 			lines.add("Upscaler: " + (!temporal ? upscaler.temporal() ? "Bilinear (" + upscaler.displayName() + " unavailable)" : "Bilinear"
 				: upscaler == DlssConfig.Upscaler.DLSS ? name + " " + quality + ", preset " + WorldUpscaler.presetName()

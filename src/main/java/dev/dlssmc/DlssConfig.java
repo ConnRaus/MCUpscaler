@@ -8,6 +8,7 @@ import java.nio.file.Path;
 import java.util.Locale;
 import java.util.Properties;
 import net.fabricmc.loader.api.FabricLoader;
+import net.minecraft.client.Minecraft;
 
 public final class DlssConfig {
 	public enum Upscaler {
@@ -50,6 +51,8 @@ public final class DlssConfig {
 
 	/** DLSS quality modes, with NVIDIA's render scales. */
 	public enum Quality {
+		/** One of the modes below, picked from the screen's height ({@link #autoQuality}). */
+		AUTO(0.0F, 2),
 		DLAA(1.0F, 5),
 		QUALITY(2.0F / 3.0F, 2),
 		BALANCED(0.58F, 1),
@@ -57,7 +60,7 @@ public final class DlssConfig {
 		ULTRA_PERFORMANCE(1.0F / 3.0F, 3),
 		CUSTOM(0.0F, 2);
 
-		/** Per-axis render scale (0 for CUSTOM: {@link #customScale}). */
+		/** Per-axis render scale (0 for AUTO and CUSTOM: {@link #renderScale}). */
 		public final float scale;
 		/** NVSDK_NGX_PerfQuality_Value. */
 		public final int ngxValue;
@@ -69,6 +72,7 @@ public final class DlssConfig {
 
 		public String displayName() {
 			return switch (this) {
+				case AUTO -> "Auto";
 				case DLAA -> upscaler == Upscaler.FSR ? "Native AA (100%)" : "DLAA (100%)";
 				case QUALITY -> "Quality (67%)";
 				case BALANCED -> "Balanced (58%)";
@@ -162,7 +166,7 @@ public final class DlssConfig {
 
 	public static boolean enabled = true;
 	public static Upscaler upscaler = Upscaler.DLSS;
-	public static Quality quality = Quality.QUALITY;
+	public static Quality quality = Quality.AUTO;
 	/** Per-axis render scale for {@link Quality#CUSTOM}. */
 	public static float customScale = 0.75F;
 	public static Preset preset = Preset.AUTO;
@@ -185,7 +189,33 @@ public final class DlssConfig {
 
 	/** Per-axis render scale for the current quality mode. */
 	public static float renderScale() {
-		return quality == Quality.CUSTOM ? Math.max(customScale, minCustomScale(upscaler)) : quality.scale;
+		Quality mode = effectiveQuality();
+		return mode == Quality.CUSTOM ? Math.max(customScale, minCustomScale(upscaler)) : mode.scale;
+	}
+
+	/** The quality mode in use: Auto resolved for the current screen. */
+	public static Quality effectiveQuality() {
+		return quality == Quality.AUTO ? autoQuality() : quality;
+	}
+
+	/**
+	 * Auto: NVIDIA's recommended mode for the output height (ultrawides go by their height): Quality up to 1080p,
+	 * Balanced at 1440p, Performance at 4K, Ultra Performance at 8K.
+	 */
+	public static Quality autoQuality() {
+		Minecraft minecraft = Minecraft.getInstance();
+		int height = minecraft == null || minecraft.getWindow() == null ? 1080 : minecraft.getWindow().getHeight();
+		return height < 1300 ? Quality.QUALITY : height < 1900 ? Quality.BALANCED : height < 3000 ? Quality.PERFORMANCE
+			: Quality.ULTRA_PERFORMANCE;
+	}
+
+	/** Quality mode for status lines: "Auto (Balanced)", "Custom 75%" or the mode's name. */
+	public static String qualityName() {
+		return switch (quality) {
+			case AUTO -> "Auto (" + autoQuality().displayName().replaceAll(" \\(.*", "") + ")";
+			case CUSTOM -> String.format(Locale.ROOT, "Custom %d%%", Math.round(renderScale() * 100));
+			default -> quality.displayName();
+		};
 	}
 
 	/**
@@ -198,8 +228,9 @@ public final class DlssConfig {
 
 	/** NGX quality value for the current settings (Custom: the mode whose defaults fit the scale best). */
 	public static int ngxQuality() {
-		if (quality != Quality.CUSTOM) {
-			return quality.ngxValue;
+		Quality mode = effectiveQuality();
+		if (mode != Quality.CUSTOM) {
+			return mode.ngxValue;
 		}
 		float s = customScale;
 		return s >= 0.99F ? Quality.DLAA.ngxValue : s >= 0.62F ? Quality.QUALITY.ngxValue : s >= 0.54F ? Quality.BALANCED.ngxValue : Quality.PERFORMANCE.ngxValue;
@@ -215,7 +246,7 @@ public final class DlssConfig {
 			props.load(reader);
 			enabled = Boolean.parseBoolean(props.getProperty("enabled", "true"));
 			upscaler = parseEnum(Upscaler.class, props.getProperty("upscaler"), Upscaler.DLSS);
-			quality = parseEnum(Quality.class, props.getProperty("quality"), Quality.QUALITY);
+			quality = parseEnum(Quality.class, props.getProperty("quality"), Quality.AUTO);
 			customScale = clampScale(Float.parseFloat(props.getProperty("customScale", "0.75")));
 			preset = parseEnum(Preset.class, props.getProperty("preset"), Preset.AUTO);
 			frameGeneration = parseFrameGeneration(props.getProperty("frameGeneration"));
@@ -245,7 +276,7 @@ public final class DlssConfig {
 		props.setProperty("ngxLogging", Boolean.toString(ngxLogging));
 		props.setProperty("debugEntryShown", Boolean.toString(debugEntryShown));
 		try (Writer writer = Files.newBufferedWriter(FILE)) {
-			props.store(writer, "DLSS for Minecraft. upscaler: DLSS, FSR or BILINEAR. frameGeneration: OFF, DLSS or FSR. quality: DLAA, QUALITY, BALANCED, PERFORMANCE, ULTRA_PERFORMANCE or CUSTOM (customScale per axis)");
+			props.store(writer, "DLSS for Minecraft. upscaler: DLSS, FSR or BILINEAR. frameGeneration: OFF, DLSS or FSR. quality: AUTO, DLAA, QUALITY, BALANCED, PERFORMANCE, ULTRA_PERFORMANCE or CUSTOM (customScale per axis)");
 		} catch (IOException e) {
 			DlssMod.LOGGER.warn("Failed to write {}", FILE, e);
 		}

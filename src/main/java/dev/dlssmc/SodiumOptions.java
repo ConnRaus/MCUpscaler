@@ -74,12 +74,15 @@ public final class SodiumOptions implements ConfigEntryPoint {
 			.addOption(builder.createEnumOption(id("quality"), DlssConfig.Quality.class)
 				.setName(Component.literal("Quality Mode"))
 				.setTooltip(mode -> tip(switch (mode) {
+					case AUTO -> "Picks the mode for your screen: Quality at 1080p, Balanced at 1440p, Performance at 4K.";
 					case DLAA -> "100% resolution, used only for anti-aliasing.";
 					case CUSTOM -> "Uses the Custom Render Scale below.";
 					default -> Math.round(mode.scale * 100) + "% resolution.";
-				} + (mode == DlssConfig.Quality.CUSTOM ? "" : "\n(" + renderResolution(mode.scale) + ")")))
-				.setElementNameProvider(mode -> Component.literal(mode.displayName()))
-				.setDefaultValue(DlssConfig.Quality.QUALITY)
+				} + (mode == DlssConfig.Quality.CUSTOM ? ""
+					: "\n(" + renderResolution(mode == DlssConfig.Quality.AUTO ? DlssConfig.autoQuality().scale : mode.scale) + ")")))
+				.setElementNameProvider(mode -> Component.literal(mode == DlssConfig.Quality.AUTO
+					? "Auto (" + DlssConfig.autoQuality().displayName().replaceAll(" \\(.*", "") + ")" : mode.displayName()))
+				.setDefaultValue(DlssConfig.Quality.AUTO)
 				.setBinding(v -> DlssConfig.quality = v, () -> DlssConfig.quality)
 				.setImpact(OptionImpact.HIGH)
 				.setStorageHandler(DlssConfig::save)
