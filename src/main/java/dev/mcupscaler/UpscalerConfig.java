@@ -192,10 +192,6 @@ public final class UpscalerConfig {
 
 	private static final Path DIR = FabricLoader.getInstance().getConfigDir();
 	private static final Path FILE = DIR.resolve("mcupscaler.properties");
-	/** This mod's config file from before it was renamed (mod id upscalermc), read once if there is no current one. */
-	private static final Path OLD_FILE = DIR.resolve("upscalermc.properties");
-	/** Config files of the two mods this one replaces (DLSS for Windows, MetalFX for macOS), read once if there is no own file. */
-	private static final Path DLSS_FILE = DIR.resolve("dlssmc.properties"), METALFX_FILE = DIR.resolve("metalfx.properties");
 
 	public static boolean enabled = true;
 	public static Upscaler upscaler = defaultUpscaler();
@@ -284,95 +280,28 @@ public final class UpscalerConfig {
 
 	public static void load() {
 		if (!Files.exists(FILE)) {
-			boolean imported = Files.exists(OLD_FILE) ? readOwn(OLD_FILE)
-				: Platform.MAC ? importMetalFx() || importDlss() : importDlss() || importMetalFx();
-			// The F3 section's id changed with the mod's: show it once more.
-			debugEntryShown = false;
-			fitToPlatform();
 			save();
 			return;
 		}
-		readOwn(FILE);
-		fitToPlatform();
-	}
-
-	private static boolean readOwn(Path file) {
 		Properties props = new Properties();
-		try (Reader reader = Files.newBufferedReader(file)) {
+		try (Reader reader = Files.newBufferedReader(FILE)) {
 			props.load(reader);
-			readCommon(props);
-			sharpness = clamp01(Float.parseFloat(props.getProperty("sharpness", "1")));
-			return true;
-		} catch (IOException | IllegalArgumentException e) {
-			UpscalerMod.LOGGER.warn("Failed to read {}, using defaults", file, e);
-			return false;
-		}
-	}
-
-	/** Settings stored the same way by the DLSS mod and this one. */
-	private static void readCommon(Properties props) {
-		enabled = Boolean.parseBoolean(props.getProperty("enabled", "true"));
-		upscaler = parseEnum(Upscaler.class, props.getProperty("upscaler"), defaultUpscaler());
-		quality = parseEnum(Quality.class, props.getProperty("quality"), Quality.AUTO);
-		customScale = clampScale(Float.parseFloat(props.getProperty("customScale", "0.75")));
-		preset = parseEnum(Preset.class, props.getProperty("preset"), Preset.AUTO);
-		frameGeneration = parseFrameGeneration(props.getProperty("frameGeneration"));
-		textureLodCorrection = Boolean.parseBoolean(props.getProperty("textureLodCorrection", "true"));
-		stillPackFoliage = Boolean.parseBoolean(props.getProperty("stillPackFoliage", "false"));
-		reflex = parseEnum(Reflex.class, props.getProperty("reflex"), Reflex.ON);
-		ngxLogging = Boolean.parseBoolean(props.getProperty("ngxLogging", "false"));
-		debugEntryShown = Boolean.parseBoolean(props.getProperty("debugEntryShown", "false"));
-	}
-
-	/** Takes over the DLSS mod's settings (dlssmc.properties). */
-	private static boolean importDlss() {
-		Properties props = read(DLSS_FILE);
-		if (props == null) {
-			return false;
-		}
-		try {
-			readCommon(props);
-			sharpness = clamp01(Float.parseFloat(props.getProperty("fsrSharpness", "1")));
-		} catch (IllegalArgumentException e) {
-			UpscalerMod.LOGGER.warn("Failed to read {}", DLSS_FILE, e);
-		}
-		UpscalerMod.LOGGER.info("Took over the settings of the DLSS mod ({})", DLSS_FILE.getFileName());
-		return true;
-	}
-
-	/** Takes over the MetalFX mod's settings (metalfx.properties): its render scale becomes the nearest quality mode. */
-	private static boolean importMetalFx() {
-		Properties props = read(METALFX_FILE);
-		if (props == null) {
-			return false;
-		}
-		try {
 			enabled = Boolean.parseBoolean(props.getProperty("enabled", "true"));
-			upscaler = switch (props.getProperty("upscaler", "TEMPORAL").trim().toUpperCase(Locale.ROOT)) {
-				case "FSR", "FAST_TEMPORAL", "SHARP" -> Upscaler.FSR;
-				case "SPATIAL", "SHARP_SPATIAL" -> Upscaler.METALFX_SPATIAL;
-				case "BILINEAR" -> Upscaler.BILINEAR;
-				default -> Upscaler.METALFX;
-			};
-			float scale = clampScale(Float.parseFloat(props.getProperty("renderScale", "0.5")));
-			quality = Quality.CUSTOM;
-			customScale = scale;
-			for (Quality mode : Quality.values()) {
-				if (mode.scale > 0.0F && Math.abs(mode.scale - scale) < 0.015F) {
-					quality = mode;
-				}
-			}
+			upscaler = parseEnum(Upscaler.class, props.getProperty("upscaler"), defaultUpscaler());
+			quality = parseEnum(Quality.class, props.getProperty("quality"), Quality.AUTO);
+			customScale = clampScale(Float.parseFloat(props.getProperty("customScale", "0.75")));
+			preset = parseEnum(Preset.class, props.getProperty("preset"), Preset.AUTO);
+			frameGeneration = parseEnum(FrameGeneration.class, props.getProperty("frameGeneration"), FrameGeneration.OFF);
 			sharpness = clamp01(Float.parseFloat(props.getProperty("sharpness", "1")));
 			textureLodCorrection = Boolean.parseBoolean(props.getProperty("textureLodCorrection", "true"));
 			stillPackFoliage = Boolean.parseBoolean(props.getProperty("stillPackFoliage", "false"));
+			reflex = parseEnum(Reflex.class, props.getProperty("reflex"), Reflex.ON);
+			ngxLogging = Boolean.parseBoolean(props.getProperty("ngxLogging", "false"));
 			debugEntryShown = Boolean.parseBoolean(props.getProperty("debugEntryShown", "false"));
-			frameGeneration = !Boolean.parseBoolean(props.getProperty("frameGeneration", "false")) ? FrameGeneration.OFF
-				: "FSR".equals(props.getProperty("frameGenBackend")) ? FrameGeneration.FSR : FrameGeneration.METALFX;
-		} catch (IllegalArgumentException e) {
-			UpscalerMod.LOGGER.warn("Failed to read {}", METALFX_FILE, e);
+		} catch (IOException | IllegalArgumentException e) {
+			UpscalerMod.LOGGER.warn("Failed to read {}, using defaults", FILE, e);
 		}
-		UpscalerMod.LOGGER.info("Took over the settings of the MetalFX mod ({})", METALFX_FILE.getFileName());
-		return true;
+		fitToPlatform();
 	}
 
 	/** Swaps choices that only exist on the other operating system for this one's counterparts (a config copied over). */
@@ -382,20 +311,6 @@ public final class UpscalerConfig {
 		}
 		if (!frameGeneration.onThisPlatform()) {
 			frameGeneration = Platform.MAC ? FrameGeneration.METALFX : FrameGeneration.DLSS;
-		}
-	}
-
-	private static Properties read(Path file) {
-		if (!Files.exists(file)) {
-			return null;
-		}
-		Properties props = new Properties();
-		try (Reader reader = Files.newBufferedReader(file)) {
-			props.load(reader);
-			return props;
-		} catch (IOException | IllegalArgumentException e) {
-			UpscalerMod.LOGGER.warn("Failed to read {}", file, e);
-			return null;
 		}
 	}
 
@@ -422,13 +337,6 @@ public final class UpscalerConfig {
 	}
 
 	/** Older configs stored frame generation as true/false, which meant DLSS-G. */
-	private static FrameGeneration parseFrameGeneration(String value) {
-		if ("true".equalsIgnoreCase(value)) {
-			return FrameGeneration.DLSS;
-		}
-		return parseEnum(FrameGeneration.class, value, FrameGeneration.OFF);
-	}
-
 	private static <E extends Enum<E>> E parseEnum(Class<E> type, String value, E fallback) {
 		if (value == null) {
 			return fallback;

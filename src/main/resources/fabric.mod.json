@@ -27,11 +27,6 @@
 		"java": ">=25",
 		"fabric-api": "*"
 	},
-	"breaks": {
-		"dlssmc": "*",
-		"metalfx": "*",
-		"upscalermc": "*"
-	},
 	"suggests": {
 		"sodium": "*"
 	}

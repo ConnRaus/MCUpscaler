@@ -175,7 +175,7 @@ tasks.register('deployToInstance', Copy) {
 		throw new GradleException('Set instance_mods_dir to the mods folder to deploy to')
 	}))
 	doFirst {
-		// Remove older builds of this mod (and of the DLSS and MetalFX mods it replaces) from the instance
-		fileTree(project.property('instance_mods_dir')).matching { include 'mcupscaler-*.jar', 'upscalermc-*.jar', 'dlssmc-*.jar', 'metalfx-*.jar' }.each { it.delete() }
+		// Remove older builds of this mod from the instance
+		fileTree(project.property('instance_mods_dir')).matching { include 'mcupscaler-*.jar' }.each { it.delete() }
 	}
 }
