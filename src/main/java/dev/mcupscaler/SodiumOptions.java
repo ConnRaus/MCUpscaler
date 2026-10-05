@@ -71,7 +71,7 @@ public final class SodiumOptions implements ConfigEntryPoint {
 			.setName(Component.literal("Upscaling"))
 			.addOption(builder.createBooleanOption(id("enabled"))
 				.setName(Component.literal("Enable Upscaling"))
-				.setTooltip(tip("Renders the world at a lower resolution and upscales it, for higher FPS. The HUD stays sharp."))
+				.setTooltip(tip("Renders the world at a lower resolution and upscales it for higher FPS."))
 				.setDefaultValue(true)
 				.setBinding(v -> UpscalerConfig.enabled = v, () -> UpscalerConfig.enabled)
 				.setImpact(OptionImpact.HIGH)

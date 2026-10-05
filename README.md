@@ -1,40 +1,43 @@
 # MCUpscaler for Minecraft (Fabric 26.3, Vulkan)
 
-Upscaling and frame generation for Minecraft's Vulkan renderer, on Windows and macOS. The world renders at a lower
-resolution and is upscaled, while the HUD and menus stay at full resolution.
+DLSS, FSR 3.1, and MetalFX upscaling and frame generation for Minecraft's Vulkan renderer on Windows and macOS. 
 
 | | Windows | macOS |
 |---|---|---|
-| Upscalers | NVIDIA DLSS 4 (RTX cards), AMD FSR 3.1 (any GPU), Bilinear | Apple MetalFX Temporal, AMD FSR 3.1, MetalFX Spatial, Bilinear |
-| Frame generation | DLSS Frame Generation (RTX 40/50), AMD FSR 3.1 | MetalFX (macOS 26+), AMD FSR 3.1 (macOS 14+) |
+| Upscalers | NVIDIA DLSS 3/4/4.5 (RTX cards), AMD FSR 3.1 (any GPU), Bilinear | Apple MetalFX Temporal and Spatial, AMD FSR 3.1, Bilinear |
+| Frame generation | DLSS Frame Generation (RTX 40/50), FSR Frame Generation (any GPU) | MetalFX (macOS 26+), AMD FSR 3.1 (macOS 14+) |
 | Latency | NVIDIA Reflex | – |
 
-One jar works on both: it picks the platform's options at startup.
+The release jar works for both Windows and MacOS. Download it from
+[Releases](https://github.com/ConnRaus/MCUpscaler/releases) and put it in your `mods` folder.
 
 ![BSL shaders and Distant Horizons with MetalFX upscaling and frame generation](docs/screenshot-bsl-dh.jpg)
+
+> [!WARNING]
+> This mod was made quickly with significant AI help as a proof of concept. It is **not** a polished mod, and I won't be releasing it on Modrinth or CurseForge for that reason. It probably has bugs, and MetalFX/FSR on Mac seems to have a bit more overhead than I expected, although it still improves performance. 
+>
+> The original goal was to test upscalers on Mac with Minecraft's new Vulkan graphics backend, and MoltenVK's Vulkan → Metal bridging particularly, by implementing some native Metal features. Slight scope creep happened, and Windows support along with DLSS was added. I hope it can be a sort of example reference to help other mod creators create more fleshed-out MetalFX/FSR/DLSS upscaling mods. 
 
 ## Requirements
 
 - Minecraft 26.3 with the **Vulkan** graphics backend (Video Settings → Graphics API → Prefer
   Vulkan), Fabric Loader 0.19.5+, Fabric API, Java 25.
 - Windows 10/11 x64, or macOS 13+.
-- Remove the older **DLSS** (`dlssmc`) and **MetalFX** (`metalfx`) mods: this one replaces both and takes over their
-  settings the first time it runs.
 
 Optional:
 
 - **Sodium**: recommended; adds the *Upscaling* page to Video Settings. Without it, use the key bindings or
   `config/mcupscaler.properties`.
-- **Vitrail** shader packs (tested with Bliss, BSL and Complementary) and **Distant Horizons** are supported.
+- **Vitrail** shaders (tested with Bliss, BSL and Complementary) and **Distant Horizons** are supported.
 
 ## Settings
 
 Video Settings → Upscaling (with Sodium):
 
-| Setting | What it does |
+| Setting | Purpose |
 |---|---|
 | Enable Upscaling | Render the world at a lower resolution and upscale it |
-| Upscaler | The platform's upscalers (above). Ones your GPU can't run are crossed out |
+| Upscaler | Choose from various upscalers. Ones your GPU can't run are crossed out |
 | Quality Mode | Auto (by screen size), Native AA (100%), Quality, Balanced, Performance, Ultra Performance or Custom |
 | Sharpness | Sharpening for FSR and MetalFX |
 | DLSS Preset | Windows, DLSS only |

@@ -35,12 +35,11 @@ public final class UpscalerConfig {
 
 		public String description() {
 			return switch (this) {
-				case DLSS -> "Best image quality. Needs an NVIDIA RTX graphics card.";
-				case FSR -> Platform.MAC ? "AMD's upscaler. An alternative to MetalFX Temporal."
-					: "Works on any graphics card. A bit softer than DLSS.";
-				case METALFX -> "Apple's upscaler. Best image quality on a Mac. Upscales at most 3x.";
-				case METALFX_SPATIAL -> "Upscales each frame on its own. Fast, but edges look harder.";
-				case BILINEAR -> "A simple stretch. Blurry; for comparison only.";
+				case DLSS -> "NVIDIA's AI upscaler. Builds an upscaled image from detail in recent frames.";
+				case FSR -> "AMD's upscaler. Builds an upscaled image from detail in recent frames.";
+				case METALFX -> "Apple's upscaler. Builds an upscaled image from detail in recent frames.";
+				case METALFX_SPATIAL -> "Apple's lightweight upscaler. Upscales each frame on its own, so fine details can shimmer.";
+				case BILINEAR -> "A plain stretch to full resolution with no added detail. Looks blurry.";
 			};
 		}
 
@@ -133,9 +132,9 @@ public final class UpscalerConfig {
 	/** Frame generation: one generated frame between every two rendered frames. */
 	public enum FrameGeneration {
 		OFF("Off", "No frame generation."),
-		DLSS("NVIDIA DLSS", "Best quality. Needs an RTX 40 or 50 series graphics card."),
-		FSR("AMD FSR 3.1", "Works on any graphics card."),
-		METALFX("MetalFX", "Apple's frame generation. Needs macOS 26.");
+		DLSS("NVIDIA DLSS", "NVIDIA's AI frame generation."),
+		FSR("AMD FSR 3.1", "AMD's frame generation."),
+		METALFX("MetalFX", "Apple's frame generation.");
 
 		private final String displayName;
 		private final String description;
@@ -150,7 +149,7 @@ public final class UpscalerConfig {
 		}
 
 		public String description() {
-			return this == FSR && Platform.MAC ? "AMD's frame generation. Needs macOS 14." : description;
+			return description;
 		}
 
 		public boolean onThisPlatform() {
