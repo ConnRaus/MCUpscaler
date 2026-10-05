@@ -56,9 +56,10 @@ The release jar is built on **Windows**; it contains the Windows natives it buil
 ./gradlew runClientGameTest     # automated test world + screenshots in build/run/clientGameTest/screenshots
 ```
 
-**Windows** needs Visual Studio (C++ build tools) and, in `_deps/`, the NVIDIA DLSS SDK (`_deps/dlss-sdk`), the AMD
-FidelityFX SDK 1.1.4 (`_deps/ffx-sdk`) and Vulkan-Headers (`_deps/vulkan-headers`), or `DLSS_SDK` / `FFX_SDK` /
-`VULKAN_HEADERS` pointing at them.
+**Windows** needs Visual Studio (C++ build tools) and, in `_deps/`, the NVIDIA DLSS SDK 310.9.1 (`_deps/dlss-sdk`),
+the AMD FidelityFX SDK 1.1.4 (`_deps/ffx-sdk`) and Vulkan-Headers 1.4.365 (`_deps/vulkan-headers`), or `DLSS_SDK` /
+`FFX_SDK` / `VULKAN_HEADERS` pointing at them. `tools\fetch_deps.bat` (or `tools/fetch_deps.sh`) downloads all three
+from their publishers; none of them are in this repository.
 
 **macOS** needs Xcode's command line tools (`xcode-select --install`); the build compiles
 `src/native/mac/metalfx_bridge.m` into a universal `libmetalfx_bridge.dylib`. A jar built on a Mac has no Windows
@@ -66,7 +67,7 @@ natives, so DLSS and FSR are unavailable in it on Windows. After changing the br
 `build/native/natives/libmetalfx_bridge.dylib` to `prebuilt/natives/` so Windows builds pick it up.
 
 The Metal FSR shaders in `src/native/mac/fsr3_*.h` are generated from the AMD FidelityFX SDK by the scripts in
-`tools/fsr3/`.
+`tools/fsr3/` (they need the FidelityFX SDK, see `tools/fetch_deps.sh`).
 
 ## How it works
 
@@ -84,4 +85,4 @@ The Metal FSR shaders in `src/native/mac/fsr3_*.h` are generated from the AMD Fi
 ## License
 
 MIT for this mod's own code, see `LICENSE`. The bundled NVIDIA DLSS and AMD FidelityFX libraries keep their own
-licenses: see `THIRD_PARTY_NOTICES.md`.
+licenses: see `THIRD_PARTY_NOTICES.md` and the full texts in `licenses/` (both are also in the jar).

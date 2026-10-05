@@ -150,6 +150,14 @@ processResources {
 	}
 }
 
+// The licenses of everything the jar bundles travel with it.
+tasks.named('jar') {
+	from('LICENSE', 'THIRD_PARTY_NOTICES.md')
+	from('licenses') {
+		into 'licenses'
+	}
+}
+
 tasks.withType(JavaCompile).configureEach {
 	it.options.release = 25
 }
