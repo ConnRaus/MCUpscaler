@@ -30,8 +30,11 @@ pass shading_change_pyramid ffx_fsr3upscaler_shading_change_pyramid_pass.glsl 0
 pass shading_change ffx_fsr3upscaler_shading_change_pass.glsl 1
 pass prepare_reactivity ffx_fsr3upscaler_prepare_reactivity_pass.glsl 1
 pass luma_instability ffx_fsr3upscaler_luma_instability_pass.glsl 1
-pass accumulate ffx_fsr3upscaler_accumulate_pass.glsl 1
-pass accumulate_sharpen ffx_fsr3upscaler_accumulate_pass.glsl 1 -DFFX_FSR3UPSCALER_OPTION_APPLY_SHARPENING=1
+# Accumulate: AMD's approximate Lanczos and FP16 samples for the history reprojection (16 taps at output resolution;
+# about 1 ms less per frame at 3024x1964 on an M3 Pro than the reference Lanczos in FP32).
+ACC=(-DFFX_FSR3UPSCALER_OPTION_REPROJECT_USE_LANCZOS_TYPE=2 -DFFX_FSR3UPSCALER_OPTION_REPROJECT_SAMPLERS_USE_DATA_HALF=1)
+pass accumulate ffx_fsr3upscaler_accumulate_pass.glsl 1 $ACC
+pass accumulate_sharpen ffx_fsr3upscaler_accumulate_pass.glsl 1 $ACC -DFFX_FSR3UPSCALER_OPTION_APPLY_SHARPENING=1
 pass rcas ffx_fsr3upscaler_rcas_pass.glsl 0
 python3 $HERE/gen_header.py $WORK $HERE/../../src/native/mac/fsr3_shaders.h \
   prepare_inputs luma_pyramid shading_change_pyramid shading_change prepare_reactivity luma_instability accumulate accumulate_sharpen rcas

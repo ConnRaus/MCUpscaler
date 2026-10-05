@@ -55,6 +55,8 @@ final class MetalBackend {
 	private static long timelineSemaphore;
 	private static long sharedEvent;
 	private static long timelineValue;
+	// DepthCapture's merges are kept natively until the temporal upscale (or flushMerges) runs them.
+	private static boolean mergesPending;
 	private static int seenGpuErrors;
 	@Nullable
 	private static String error;
@@ -224,6 +226,8 @@ final class MetalBackend {
 		if (in == 0L || depth == 0L || hand == 0L || out == 0L) {
 			return missingTextures();
 		}
+		// The kept depth merges run at the start of this command buffer.
+		mergesPending = false;
 		return run((event, wait, done) -> NativeBridge.upscaleTemporal(in, depth, hand, out, event, wait, done, temporalParams.address()), false);
 	}
 
@@ -235,7 +239,10 @@ final class MetalBackend {
 		}
 		long d = mtl(preTl), e = mtl(postTl);
 		long tlPre = d == 0L || e == 0L ? 0L : d, tlPost = d == 0L || e == 0L ? 0L : e;
-		return run((event, wait, done) -> NativeBridge.mergePackDepth(a, b, c, tlPre, tlPost, event, wait, done), false);
+		// Kept for the next temporal upscale (or flushMerges): no Vulkan <-> Metal round trip of its own.
+		int result = NativeBridge.mergePackDepth(a, b, c, tlPre, tlPost);
+		mergesPending |= result > 0;
+		return result;
 	}
 
 	/** See DepthCapture#mergeDistantDepth: rewrites {@code scene} in place. */
@@ -244,7 +251,9 @@ final class MetalBackend {
 		if (a == 0L || b == 0L) {
 			return missingTextures();
 		}
-		return run((event, wait, done) -> NativeBridge.mergeDistantDepth(a, b, pairA, pairB, event, wait, done), false);
+		int result = NativeBridge.mergeDistantDepth(a, b, pairA, pairB);
+		mergesPending |= result > 0;
+		return result;
 	}
 
 	static void writeMatrix(MemorySegment segment, long offset, Matrix4f matrix) {
@@ -296,7 +305,19 @@ final class MetalBackend {
 		return presenterRequested ? NativeBridge.fgTakeGenerated() : 0;
 	}
 
+	/** Runs the kept depth merges now, if the frame had no temporal upscale to run them. */
+	private static void flushMerges() {
+		if (mergesPending) {
+			mergesPending = false;
+			run(NativeBridge::mergesFlush, false);
+		}
+	}
+
 	static void beginFrame() {
+		if (mergesPending) {
+			mergesPending = false;
+			NativeBridge.mergesDiscard();
+		}
 		fgCaptured = false;
 	}
 
@@ -311,6 +332,7 @@ final class MetalBackend {
 			fgHistoryValid = false;
 			return;
 		}
+		flushMerges();
 		var encoder = RenderSystem.getDevice().createCommandEncoder();
 		fgWorld = ensureCopy(fgWorld, "Upscaler Frame Gen World", color);
 		fgHand = ensureCopy(fgHand, "Upscaler Frame Gen Hand Depth", handDepth);

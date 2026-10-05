@@ -984,112 +984,133 @@ static id<MTLCommandBuffer> encodeFsr(id<MTLCommandBuffer> cb, id<MTLTexture> in
     return splitStage(cb, 1);
 }
 
-// Rewrites preTex (Depth32Float, the depth before a shader pack drew the hand) into the scene depth without the hand
-// but with everything drawn after it (see pack_depth_merge). Returns 1 on success.
-int mfx_merge_pack_depth(uintptr_t preTex, uintptr_t postTex, uintptr_t finTex, uintptr_t preTlTex, uintptr_t postTlTex,
-                         uintptr_t sharedEvent, uint64_t waitValue, uint64_t signalValue) {
+// Depth merges. They don't run on their own: each call checks its textures and keeps the merge, and the next temporal
+// upscale (mfx_upscale_temporal) or mfx_merges_flush encodes it at the start of its command buffer. That saves a Vulkan ->
+// Metal -> Vulkan round trip per merge (about 0.5 ms a frame on an M3 Pro).
+static BOOL gPendingPack, gPendingDistant;
+static id<MTLTexture> gPendingPre, gPendingPost, gPendingFin, gPendingPreTl, gPendingPostTl, gPendingScene, gPendingFar;
+static float gPendingPair[2];
+
+static void forgetMerges(void) {
+    gPendingPack = gPendingDistant = NO;
+    gPendingPre = gPendingPost = gPendingFin = gPendingPreTl = gPendingPostTl = gPendingScene = gPendingFar = nil;
+}
+
+// Runs the merge kernel into gMergeBuffer, then copies the result over dst (a depth texture can't be written directly).
+static void encodeMerge(id<MTLCommandBuffer> cb, id<MTLComputePipelineState> pipeline, NSString *label, id<MTLTexture> dst,
+                        NSArray<id<MTLTexture>> *textures, const float *pair) {
+    NSUInteger w = dst.width, h = dst.height, bytes = w * h * 4;
+    if (gMergeBuffer == nil || gMergeBuffer.length < bytes) {
+        gMergeBuffer = [gDevice newBufferWithLength:bytes options:MTLResourceStorageModePrivate];
+    }
+    id<MTLComputeCommandEncoder> ce = [cb computeCommandEncoder];
+    ce.label = label;
+    [ce setComputePipelineState:pipeline];
+    for (NSUInteger i = 0; i < textures.count; i++) [ce setTexture:textures[i] atIndex:i];
+    [ce setBuffer:gMergeBuffer offset:0 atIndex:0];
+    if (pair != NULL) [ce setBytes:pair length:2 * sizeof(float) atIndex:1];
+    [ce dispatchThreads:MTLSizeMake(w, h, 1) threadsPerThreadgroup:MTLSizeMake(16, 16, 1)];
+    [ce endEncoding];
+    id<MTLBlitCommandEncoder> blit = [cb blitCommandEncoder];
+    [blit copyFromBuffer:gMergeBuffer sourceOffset:0 sourceBytesPerRow:w * 4 sourceBytesPerImage:bytes
+              sourceSize:MTLSizeMake(w, h, 1) toTexture:dst destinationSlice:0 destinationLevel:0
+       destinationOrigin:MTLOriginMake(0, 0, 0)];
+    [blit endEncoding];
+}
+
+// Encodes the kept merges into cb (in the order they were made) and forgets them.
+static void encodePendingMerges(id<MTLCommandBuffer> cb) {
+    if (gPendingPack) {
+        encodeMerge(cb, gMergePipeline, @"Pack depth merge", gPendingPre,
+                    @[gPendingPre, gPendingPost, gPendingFin, gPendingPreTl, gPendingPostTl], NULL);
+    }
+    if (gPendingDistant) encodeMerge(cb, gDistantPipeline, @"Distant depth merge", gPendingScene, @[gPendingScene, gPendingFar], gPendingPair);
+    forgetMerges();
+}
+
+// Keeps a merge that rewrites preTex (Depth32Float, the depth before a shader pack drew the hand) into the scene depth
+// without the hand but with everything drawn after it (see pack_depth_merge). Returns 1 if kept.
+int mfx_merge_pack_depth(uintptr_t preTex, uintptr_t postTex, uintptr_t finTex, uintptr_t preTlTex, uintptr_t postTlTex) {
     @autoreleasepool {
-        if (gQueue == nil || sharedEvent == 0) {
+        if (gQueue == nil) {
             setError(@"bridge not initialised");
             return -1;
         }
-        id<MTLSharedEvent> event = (__bridge id<MTLSharedEvent>)(void *)sharedEvent;
         id<MTLTexture> pre = (__bridge id<MTLTexture>)(void *)preTex;
         id<MTLTexture> post = (__bridge id<MTLTexture>)(void *)postTex;
         id<MTLTexture> fin = (__bridge id<MTLTexture>)(void *)finTex;
         // No translucent hand pass captured: compare a texture with itself (never a difference).
         id<MTLTexture> preTl = preTlTex != 0 ? (__bridge id<MTLTexture>)(void *)preTlTex : post;
         id<MTLTexture> postTl = postTlTex != 0 ? (__bridge id<MTLTexture>)(void *)postTlTex : preTl;
-        id<MTLCommandBuffer> cb = [gQueue commandBuffer];
-        if (cb == nil) {
-            setError(@"failed to create MTLCommandBuffer");
-            return -1;
-        }
-        cb.label = @"MetalFX Pack Depth Merge";
-        encodeWait(event, waitValue);
-        int result = 0;
+        if (!ensureMotionPipeline()) return 0;
         NSUInteger w = pre.width, h = pre.height;
-        if (ensureMotionPipeline() && pre.pixelFormat == MTLPixelFormatDepth32Float
-            && post.width == w && post.height == h && fin.width == w && fin.height == h
-            && preTl.width == w && preTl.height == h && postTl.width == w && postTl.height == h) {
-            NSUInteger bytes = w * h * 4;
-            if (gMergeBuffer == nil || gMergeBuffer.length < bytes) {
-                gMergeBuffer = [gDevice newBufferWithLength:bytes options:MTLResourceStorageModePrivate];
-            }
-            id<MTLComputeCommandEncoder> ce = [cb computeCommandEncoder];
-            [ce setComputePipelineState:gMergePipeline];
-            [ce setTexture:pre atIndex:0];
-            [ce setTexture:post atIndex:1];
-            [ce setTexture:fin atIndex:2];
-            [ce setTexture:preTl atIndex:3];
-            [ce setTexture:postTl atIndex:4];
-            [ce setBuffer:gMergeBuffer offset:0 atIndex:0];
-            [ce dispatchThreads:MTLSizeMake(w, h, 1) threadsPerThreadgroup:MTLSizeMake(16, 16, 1)];
-            [ce endEncoding];
-            id<MTLBlitCommandEncoder> blit = [cb blitCommandEncoder];
-            [blit copyFromBuffer:gMergeBuffer sourceOffset:0 sourceBytesPerRow:w * 4 sourceBytesPerImage:bytes
-                      sourceSize:MTLSizeMake(w, h, 1) toTexture:pre destinationSlice:0 destinationLevel:0
-               destinationOrigin:MTLOriginMake(0, 0, 0)];
-            [blit endEncoding];
-            result = 1;
-        } else if (gMergePipeline != nil) {
+        if (pre.pixelFormat != MTLPixelFormatDepth32Float || post.width != w || post.height != h || fin.width != w || fin.height != h
+            || preTl.width != w || preTl.height != h || postTl.width != w || postTl.height != h) {
             setError(@"pack depth merge: mismatched depth textures");
+            return 0;
         }
-        [cb encodeSignalEvent:event value:signalValue];
-        [cb commit];
-        return result;
+        gPendingPack = YES;
+        gPendingPre = pre;
+        gPendingPost = post;
+        gPendingFin = fin;
+        gPendingPreTl = preTl;
+        gPendingPostTl = postTl;
+        return 1;
     }
 }
 
-int mfx_merge_distant_depth(uintptr_t sceneTex, uintptr_t dhTex, float pairA, float pairB,
-                            uintptr_t sharedEvent, uint64_t waitValue, uint64_t signalValue) {
+// Keeps a merge of Distant Horizons' depth (dhTex) into the scene depth (sceneTex, see distant_depth_merge). Returns 1 if
+// kept.
+int mfx_merge_distant_depth(uintptr_t sceneTex, uintptr_t dhTex, float pairA, float pairB) {
+    @autoreleasepool {
+        if (gQueue == nil) {
+            setError(@"bridge not initialised");
+            return -1;
+        }
+        id<MTLTexture> scene = (__bridge id<MTLTexture>)(void *)sceneTex;
+        id<MTLTexture> dh = (__bridge id<MTLTexture>)(void *)dhTex;
+        if (!ensureMotionPipeline()) return 0;
+        if (scene.pixelFormat != MTLPixelFormatDepth32Float || dh.pixelFormat != MTLPixelFormatDepth32Float
+            || dh.width != scene.width || dh.height != scene.height || pairA == 0.0f) {
+            setError([NSString stringWithFormat:@"distant depth merge: mismatched textures (%lux%lu fmt %lu, far %lux%lu fmt %lu)",
+                      (unsigned long)scene.width, (unsigned long)scene.height, (unsigned long)scene.pixelFormat,
+                      (unsigned long)dh.width, (unsigned long)dh.height, (unsigned long)dh.pixelFormat]);
+            return 0;
+        }
+        gPendingDistant = YES;
+        gPendingScene = scene;
+        gPendingFar = dh;
+        gPendingPair[0] = pairA;
+        gPendingPair[1] = pairB;
+        return 1;
+    }
+}
+
+// Runs the kept merges now (frame generation copies the depth on the Vulkan side when there was no temporal upscale).
+int mfx_merges_flush(uintptr_t sharedEvent, uint64_t waitValue, uint64_t signalValue) {
     @autoreleasepool {
         if (gQueue == nil || sharedEvent == 0) {
             setError(@"bridge not initialised");
             return -1;
         }
         id<MTLSharedEvent> event = (__bridge id<MTLSharedEvent>)(void *)sharedEvent;
-        id<MTLTexture> scene = (__bridge id<MTLTexture>)(void *)sceneTex;
-        id<MTLTexture> dh = (__bridge id<MTLTexture>)(void *)dhTex;
         id<MTLCommandBuffer> cb = [gQueue commandBuffer];
         if (cb == nil) {
             setError(@"failed to create MTLCommandBuffer");
             return -1;
         }
-        cb.label = @"MetalFX Distant Depth Merge";
+        cb.label = @"MetalFX Depth Merges";
         encodeWait(event, waitValue);
-        int result = 0;
-        NSUInteger w = scene.width, h = scene.height;
-        if (ensureMotionPipeline() && scene.pixelFormat == MTLPixelFormatDepth32Float && dh.pixelFormat == MTLPixelFormatDepth32Float
-            && dh.width == w && dh.height == h && pairA != 0.0f) {
-            NSUInteger bytes = w * h * 4;
-            if (gMergeBuffer == nil || gMergeBuffer.length < bytes) {
-                gMergeBuffer = [gDevice newBufferWithLength:bytes options:MTLResourceStorageModePrivate];
-            }
-            float pair[2] = {pairA, pairB};
-            id<MTLComputeCommandEncoder> ce = [cb computeCommandEncoder];
-            [ce setComputePipelineState:gDistantPipeline];
-            [ce setTexture:scene atIndex:0];
-            [ce setTexture:dh atIndex:1];
-            [ce setBuffer:gMergeBuffer offset:0 atIndex:0];
-            [ce setBytes:pair length:sizeof(pair) atIndex:1];
-            [ce dispatchThreads:MTLSizeMake(w, h, 1) threadsPerThreadgroup:MTLSizeMake(16, 16, 1)];
-            [ce endEncoding];
-            id<MTLBlitCommandEncoder> blit = [cb blitCommandEncoder];
-            [blit copyFromBuffer:gMergeBuffer sourceOffset:0 sourceBytesPerRow:w * 4 sourceBytesPerImage:bytes
-                      sourceSize:MTLSizeMake(w, h, 1) toTexture:scene destinationSlice:0 destinationLevel:0
-               destinationOrigin:MTLOriginMake(0, 0, 0)];
-            [blit endEncoding];
-            result = 1;
-        } else if (gDistantPipeline != nil) {
-            setError([NSString stringWithFormat:@"distant depth merge: mismatched textures (%lux%lu fmt %lu, far %lux%lu fmt %lu)",
-                      (unsigned long)w, (unsigned long)h, (unsigned long)scene.pixelFormat,
-                      (unsigned long)dh.width, (unsigned long)dh.height, (unsigned long)dh.pixelFormat]);
-        }
+        encodePendingMerges(cb);
         [cb encodeSignalEvent:event value:signalValue];
         [cb commit];
-        return result;
+        return 1;
     }
+}
+
+// Forgets the kept merges (a frame that had nothing to use them).
+void mfx_merges_discard(void) {
+    forgetMerges();
 }
 
 int mfx_upscale_temporal(uintptr_t inTex, uintptr_t sceneDepthTex, uintptr_t handDepthTex, uintptr_t dstTex,
@@ -1108,6 +1129,7 @@ int mfx_upscale_temporal(uintptr_t inTex, uintptr_t sceneDepthTex, uintptr_t han
         }
         cb.label = @"MetalFX Temporal Upscale";
         encodeWait(event, waitValue);
+        encodePendingMerges(cb); // the kept depth merges, before anything reads the depth
 
         int result = 0;
         id<MTLTexture> in = (__bridge id<MTLTexture>)(void *)inTex;
@@ -1167,7 +1189,7 @@ typedef struct {
     float motionScaleX, motionScaleY, frameTimeMs;
     uint32_t backend;           // 0 = FSR 3, 1 = MetalFX frame interpolation
     float crossHalfX, crossHalfY; // F3 axis crosshair: half size of a centred box (fraction of the image), 0 = none
-    uint32_t menuOpen;          // a blurred menu covers the world: MetalFX frame generation shows the real frame
+    uint32_t menuOpen;          // a blurred menu covers the world: frame generation shows the real frame
     uint32_t pad4;
     float objMin[4], objMax[4]; // third person: the player's box relative to the camera (min > max = none)
     float objDelta[4];          // the player's movement since the previous frame
@@ -1299,6 +1321,20 @@ kernel void fg_mfx_composite(texture2d<float, access::read> generated [[texture(
     float keep = smoothstep(0.08, 0.3, max(max(abs(delta.r), abs(delta.g)), abs(delta.b)));\n\
     out.write(float4(mix(saturate(g + delta), f, keep), 1.0), gid);\n\
 }\n\
+// FSR backend: the same, in place on the generated image.\n\
+kernel void fg_fsr_composite(texture2d<float, access::read_write> gen [[texture(0)]],\n\
+                             texture2d<float, access::read> world [[texture(1)]],\n\
+                             texture2d<float, access::read> final [[texture(2)]],\n\
+                             constant uint &menuOpen [[buffer(0)]],\n\
+                             uint2 gid [[thread_position_in_grid]]) {\n\
+    if (gid.x >= gen.get_width() || gid.y >= gen.get_height()) return;\n\
+    float3 f = final.read(gid).rgb;\n\
+    if (menuOpen != 0) { gen.write(float4(f, 1.0), gid); return; }\n\
+    float3 g = gen.read(gid).rgb;\n\
+    float3 delta = f - world.read(gid).rgb;\n\
+    float keep = smoothstep(0.08, 0.3, max(max(abs(delta.r), abs(delta.g)), abs(delta.b)));\n\
+    gen.write(float4(mix(saturate(g + delta), f, keep), 1.0), gid);\n\
+}\n\
 // Camera motion vectors (pixels, current -> previous, as for the FSR upscaler) and depth including the hand.\n\
 kernel void fg_inputs(depth2d<float, access::read> sceneDepth [[texture(0)]],\n\
                       depth2d<float, access::read> handDepth [[texture(1)]],\n\
@@ -1397,7 +1433,7 @@ fragment float4 fg_present_fs(PresentOut in [[stage_in]], texture2d<float> src [
 static id<MTLLibrary> gFgLibrary;
 static id<MTLComputePipelineState> gFgPipelines[FG_PASS_COUNT];
 static id<MTLComputePipelineState> gFgInputsPipeline, gFgHandPipeline, gFgHalfPipeline, gFgClearF, gFgClearU;
-static id<MTLComputePipelineState> gMfxPreparePipeline, gMfxCompositePipeline, gFgHandMaskPipeline;
+static id<MTLComputePipelineState> gMfxPreparePipeline, gMfxCompositePipeline, gFsrCompositePipeline, gFgHandMaskPipeline;
 static id<MTLTexture> gFgHandMask;
 static id<MTLSamplerState> gFgLinearClamp;
 static BOOL gFgCompileFailed;
@@ -1481,6 +1517,7 @@ static BOOL ensureFgPipelines(void) {
     gFgHandMaskPipeline = [gDevice newComputePipelineStateWithFunction:[gFgLibrary newFunctionWithName:@"fg_hand_mask"] error:&error];
     gMfxPreparePipeline = [gDevice newComputePipelineStateWithFunction:[gFgLibrary newFunctionWithName:@"fg_mfx_prepare"] error:&error];
     gMfxCompositePipeline = [gDevice newComputePipelineStateWithFunction:[gFgLibrary newFunctionWithName:@"fg_mfx_composite"] error:&error];
+    gFsrCompositePipeline = [gDevice newComputePipelineStateWithFunction:[gFgLibrary newFunctionWithName:@"fg_fsr_composite"] error:&error];
     gFgClearF = [gDevice newComputePipelineStateWithFunction:[gFgLibrary newFunctionWithName:@"fg_clear_f"] error:&error];
     gFgClearU = [gDevice newComputePipelineStateWithFunction:[gFgLibrary newFunctionWithName:@"fg_clear_u"] error:&error];
     MTLCompileOptions *options = [MTLCompileOptions new];
@@ -1497,7 +1534,7 @@ static BOOL ensureFgPipelines(void) {
             gFgPipelines[i] = pso;
         }
     });
-    if (failure == nil && (gFgInputsPipeline == nil || gFgHandPipeline == nil || gFgHalfPipeline == nil || gMfxPreparePipeline == nil || gMfxCompositePipeline == nil || gFgHandMaskPipeline == nil || gFgClearF == nil || gFgClearU == nil)) {
+    if (failure == nil && (gFgInputsPipeline == nil || gFgHandPipeline == nil || gFgHalfPipeline == nil || gMfxPreparePipeline == nil || gMfxCompositePipeline == nil || gFsrCompositePipeline == nil || gFgHandMaskPipeline == nil || gFgClearF == nil || gFgClearU == nil)) {
         failure = [NSString stringWithFormat:@"frame generation helpers: %@", error.localizedDescription];
     }
     const int spdPasses[] = {FG_OF_LUMINANCE_PYRAMID, FG_OF_SCD_DIVERGENCE, FG_FI_GAME_VECTOR_FIELD_INPAINTING_PYRAMID, FG_FI_INPAINTING_PYRAMID};
@@ -1854,7 +1891,10 @@ static void encodeFrameGen(id<MTLCommandBuffer> cb, int stage, int slot, const M
     fc.deviceToViewDepth[2] = p->tanHalfFovX;
     fc.deviceToViewDepth[3] = p->tanHalfFovY;
     fc.deltaTime = p->frameTimeMs;
-    fc.hudLessAttachedFactor = 1;
+    // No HUD-less handling in the shaders: they take any pixel where the final image differs from the world image for
+    // HUD and paste the real frame there, and Minecraft's vignette (drawn with the HUD, strong in dark places) made that
+    // an oval of real frame around the interpolated centre. The HUD is composited afterwards, as for MetalFX.
+    fc.hudLessAttachedFactor = 0;
     fc.distortionFieldSize[0] = fc.distortionFieldSize[1] = 1;
     fc.opticalFlowScale[0] = 1.0f / ow;
     fc.opticalFlowScale[1] = 1.0f / oh;
@@ -1958,7 +1998,7 @@ static void encodeFrameGen(id<MTLCommandBuffer> cb, int stage, int slot, const M
     [ce setTexture:out atIndex:9];
     fgDispatch(ce, FG_FI_INTERPOLATION, displayX, displayY, 1, 8, 8, 1);
 
-    // Inpainting pyramid + inpainting (also brings in this frame's HUD from the final image).
+    // Inpainting pyramid + inpainting.
     ce = fgGroup(cb, ce, 7);
     pc = spdSetup(dw, dh, -1, &gx, &gy);
     [ce setBuffer:gFgCounters offset:0 atIndex:1];
@@ -1978,6 +2018,13 @@ static void encodeFrameGen(id<MTLCommandBuffer> cb, int stage, int slot, const M
     fgDispatch(ce, FG_FI_INPAINTING, displayX, displayY, 1, 8, 8, 1);
 
     ce = fgGroup(cb, ce, 9);
+    [ce setComputePipelineState:gFsrCompositePipeline];
+    [ce setTexture:out atIndex:0];
+    [ce setTexture:world atIndex:1];
+    [ce setTexture:real atIndex:2];
+    uint32_t menuOpen = p->menuOpen;
+    [ce setBytes:&menuOpen length:sizeof menuOpen atIndex:0];
+    dispatch2D(ce, gFsrCompositePipeline, out.width, out.height);
     encodeHandFix(ce, stage, real, out, p);
     [ce endEncoding];
     if (gProfile) fgCollectProfile(cb);

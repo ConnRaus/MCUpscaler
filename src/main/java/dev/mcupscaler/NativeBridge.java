@@ -22,6 +22,8 @@ public final class NativeBridge {
 	private static MethodHandle upscaleTemporal;
 	private static MethodHandle mergePackDepth;
 	private static MethodHandle mergeDistantDepth;
+	private static MethodHandle mergesFlush;
+	private static MethodHandle mergesDiscard;
 	private static MethodHandle temporalSupported;
 	private static MethodHandle temporalMaxScale;
 	private static MethodHandle frameInterpolationSupported;
@@ -69,18 +71,21 @@ public final class NativeBridge {
 				lookup.findOrThrow("mfx_merge_pack_depth"),
 				FunctionDescriptor.of(
 					ValueLayout.JAVA_INT,
-					ValueLayout.JAVA_LONG, ValueLayout.JAVA_LONG, ValueLayout.JAVA_LONG, ValueLayout.JAVA_LONG, ValueLayout.JAVA_LONG,
-					ValueLayout.JAVA_LONG, ValueLayout.JAVA_LONG, ValueLayout.JAVA_LONG
+					ValueLayout.JAVA_LONG, ValueLayout.JAVA_LONG, ValueLayout.JAVA_LONG, ValueLayout.JAVA_LONG, ValueLayout.JAVA_LONG
 				)
 			);
 			mergeDistantDepth = linker.downcallHandle(
 				lookup.findOrThrow("mfx_merge_distant_depth"),
 				FunctionDescriptor.of(
 					ValueLayout.JAVA_INT,
-					ValueLayout.JAVA_LONG, ValueLayout.JAVA_LONG, ValueLayout.JAVA_FLOAT, ValueLayout.JAVA_FLOAT,
-					ValueLayout.JAVA_LONG, ValueLayout.JAVA_LONG, ValueLayout.JAVA_LONG
+					ValueLayout.JAVA_LONG, ValueLayout.JAVA_LONG, ValueLayout.JAVA_FLOAT, ValueLayout.JAVA_FLOAT
 				)
 			);
+			mergesFlush = linker.downcallHandle(
+				lookup.findOrThrow("mfx_merges_flush"),
+				FunctionDescriptor.of(ValueLayout.JAVA_INT, ValueLayout.JAVA_LONG, ValueLayout.JAVA_LONG, ValueLayout.JAVA_LONG)
+			);
+			mergesDiscard = linker.downcallHandle(lookup.findOrThrow("mfx_merges_discard"), FunctionDescriptor.ofVoid());
 			temporalSupported = linker.downcallHandle(lookup.findOrThrow("mfx_temporal_supported"), FunctionDescriptor.of(ValueLayout.JAVA_INT));
 			temporalMaxScale = linker.downcallHandle(lookup.findOrThrow("mfx_temporal_max_scale"), FunctionDescriptor.of(ValueLayout.JAVA_FLOAT));
 			frameInterpolationSupported = linker.downcallHandle(
@@ -158,21 +163,40 @@ public final class NativeBridge {
 		}
 	}
 
-	/** Same return contract as {@link #upscale}; rewrites {@code preHand} in place (see mfx_merge_pack_depth). */
-	public static int mergePackDepth(
-		long preHand, long postHand, long finalDepth, long preTranslucentHand, long postTranslucentHand, long sharedEvent, long waitValue, long signalValue
-	) {
+	/**
+	 * Keeps a merge that rewrites {@code preHand} (see mfx_merge_pack_depth): it runs at the start of the next
+	 * {@link #upscaleTemporal} or {@link #mergesFlush}. 1 if kept, 0 if not (see {@link #lastError}), -1 on failure.
+	 */
+	public static int mergePackDepth(long preHand, long postHand, long finalDepth, long preTranslucentHand, long postTranslucentHand) {
 		try {
-			return (int)mergePackDepth.invokeExact(preHand, postHand, finalDepth, preTranslucentHand, postTranslucentHand, sharedEvent, waitValue, signalValue);
+			return (int)mergePackDepth.invokeExact(preHand, postHand, finalDepth, preTranslucentHand, postTranslucentHand);
 		} catch (Throwable t) {
 			throw new RuntimeException(t);
 		}
 	}
 
-	/** Same return contract as {@link #upscale}; rewrites {@code sceneDepth} in place (see mfx_merge_distant_depth). */
-	public static int mergeDistantDepth(long sceneDepth, long distantDepth, float pairA, float pairB, long sharedEvent, long waitValue, long signalValue) {
+	/** Like {@link #mergePackDepth}, for a merge that rewrites {@code sceneDepth} (see mfx_merge_distant_depth). */
+	public static int mergeDistantDepth(long sceneDepth, long distantDepth, float pairA, float pairB) {
 		try {
-			return (int)mergeDistantDepth.invokeExact(sceneDepth, distantDepth, pairA, pairB, sharedEvent, waitValue, signalValue);
+			return (int)mergeDistantDepth.invokeExact(sceneDepth, distantDepth, pairA, pairB);
+		} catch (Throwable t) {
+			throw new RuntimeException(t);
+		}
+	}
+
+	/** Runs the kept merges now. Same return contract as {@link #upscale}. */
+	public static int mergesFlush(long sharedEvent, long waitValue, long signalValue) {
+		try {
+			return (int)mergesFlush.invokeExact(sharedEvent, waitValue, signalValue);
+		} catch (Throwable t) {
+			throw new RuntimeException(t);
+		}
+	}
+
+	/** Forgets the kept merges. */
+	public static void mergesDiscard() {
+		try {
+			mergesDiscard.invokeExact();
 		} catch (Throwable t) {
 			throw new RuntimeException(t);
 		}

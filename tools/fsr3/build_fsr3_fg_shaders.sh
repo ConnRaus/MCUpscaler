@@ -22,6 +22,31 @@ s, n = re.subn(r'LOAD\((?!5\))\d+\);\n', '', s)
 assert n == 12, n
 open(path, 'w').write(s)
 EOF
+# Interpolation: one hardware bilinear sample (the linear clamp sampler) instead of four reads. The interpolation rect is
+# the whole texture here, so clamping to the edge gives the colour of AMD's renormalised in-rect taps; the weight sum is
+# worked out per axis. Measurably faster at 3024x1964.
+python3 - $WORK/gpu/frameinterpolation/ffx_frameinterpolation.h <<'EOF'
+import sys
+path = sys.argv[1]
+s = open(path).read()
+old = s[s.index('    BilinearSamplingData bilinearInfo = GetBilinearSamplingData(fReprojectedUv, texSize);'):s.index('    result.fRaw               = fColor;')]
+new = '''    FfxFloat32x2 fPxSample = fReprojectedUv * FfxFloat32x2(texSize) - FfxFloat32x2(0.5, 0.5);
+    FfxFloat32x2 fBase = floor(fPxSample);
+    FfxFloat32x2 fFrac = fPxSample - fBase;
+    FfxFloat32x2 fLo = FfxFloat32x2(InterpolationRectBase());
+    FfxFloat32x2 fHi = fLo + FfxFloat32x2(InterpolationRectSize());
+    FfxFloat32x2 fW0 = (FfxFloat32x2(1.0, 1.0) - fFrac) * FfxFloat32x2(greaterThanEqual(fBase, fLo)) * FfxFloat32x2(lessThan(fBase, fHi));
+    FfxFloat32x2 fW1 = fFrac * FfxFloat32x2(greaterThanEqual(fBase + 1.0, fLo)) * FfxFloat32x2(lessThan(fBase + 1.0, fHi));
+    FfxFloat32 fWeightSum = (fW0.x + fW1.x) * (fW0.y + fW1.y);
+
+    FfxFloat32x3 fColor = FfxFloat32x3(0.0, 0.0, 0.0);
+    if (fWeightSum != 0.0f)
+        fColor = isCurrent ? SampleCurrentBackbuffer(fReprojectedUv) : SamplePreviousBackbuffer(fReprojectedUv);
+
+'''
+s = s.replace(old, new)
+open(path, 'w').write(s)
+EOF
 SRC=$SDK/sdk/src/backends/vk/shaders
 # Permutation: LDR colour, render-size motion vectors without jitter, inverted (reversed-Z) depth; FP32 everywhere.
 OF_DEFS=(-DFFX_GPU=1 -DFFX_GLSL=1 -DFFX_HALF=0 -DFFX_OPTICALFLOW_OPTION_HDR_COLOR_INPUT=0)

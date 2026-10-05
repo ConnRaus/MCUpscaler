@@ -172,6 +172,43 @@ public class UpscalerScreenshotTest implements FabricClientGameTest {
 			String[] window = size.split("x");
 			context.getInput().resizeWindow(Integer.parseInt(window[0]), Integer.parseInt(window[1]));
 		}
+		// MAC_WORLD=<save folder>: opens that saved world (copied in with -PtestRunFiles) instead of a fresh one.
+		String savedWorld = System.getenv("MAC_WORLD");
+		if (savedWorld != null) {
+			context.runOnClient(mc -> mc.createWorldOpenFlows().openWorld(savedWorld, () -> {}));
+			context.waitFor(mc -> mc.level != null && mc.player != null && mc.gui.screen() == null, 3000);
+			// MAC_ROOM=1: a closed room lit by lamps around the player (in the test's copy of the world), like the
+			// player's storage room: dim, so Minecraft's vignette is strong.
+			if (System.getenv("MAC_ROOM") != null) {
+				context.runOnClient(mc -> {
+					var server = mc.getSingleplayerServer();
+					net.minecraft.core.BlockPos p = mc.player.blockPosition();
+					String at = p.getX() + " " + p.getY() + " " + p.getZ();
+					server.execute(() -> {
+						var source = server.createCommandSourceStack().withSuppressedOutput();
+						java.util.function.Consumer<String> run = command -> server.getCommands().performPrefixedCommand(source, "execute positioned " + at + " run " + command);
+						run.accept("fill ~-20 ~-2 ~-20 ~20 ~7 ~20 minecraft:dark_oak_planks hollow");
+						for (int x = -19; x <= 19; x += 2) for (int z = -19; z <= 19; z += 2) {
+							// A checkered floor of light and dark wood, and lamps in the ceiling every 4 blocks.
+							run.accept("fill ~" + x + " ~-2 ~" + z + " ~" + (x + 1) + " ~-2 ~" + (z + 1) + " minecraft:" + ((x + z) % 4 == 0 ? "birch_planks" : "spruce_planks"));
+						}
+						for (int x = -18; x <= 18; x += 4) for (int z = -18; z <= 18; z += 4) {
+							run.accept("setblock ~" + x + " ~7 ~" + z + " minecraft:glowstone");
+						}
+						for (int x = -18; x <= 18; x += 6) {
+							run.accept("fill ~" + x + " ~-1 ~-19 ~" + x + " ~4 ~-19 minecraft:chest");
+							run.accept("fill ~" + x + " ~-1 ~19 ~" + x + " ~4 ~19 minecraft:chest");
+						}
+					});
+				});
+			}
+			// Distant Horizons loads its saved terrain in the background.
+			context.waitTicks(600);
+			macPerf(context);
+			// The world stays open: closing it hangs on Distant Horizons saving, so the run ends with the game test's
+			// "finished while a server is still running" failure, which is expected here.
+			return;
+		}
 		try (TestSingleplayerContext singleplayer = context.worldBuilder().setUseConsistentSettings(false).adjustSettings(state -> state.setSeed("mcupscaler")).create()) {
 			try {
 				server = singleplayer.getServer();
@@ -201,6 +238,10 @@ public class UpscalerScreenshotTest implements FabricClientGameTest {
 				}
 				context.getInput().lookAt(YAW, pitch);
 				context.waitTicks(System.getenv("DLSS_FAR") != null ? 1200 : 300);
+				if (System.getenv("MAC_PERF") != null) {
+					macPerf(context);
+					return;
+				}
 				if (System.getenv("DLSS_BENCH") != null) {
 					benchmark(context);
 					return;
@@ -335,6 +376,184 @@ public class UpscalerScreenshotTest implements FabricClientGameTest {
 				context.waitTicks(1);
 			}
 		}
+	}
+
+	/**
+	 * macOS (MAC_PERF=1, best with MFX_PROFILE=1): rendered FPS and GPU time per upscaler while the camera turns, then FSR and
+	 * MetalFX frame generation. Judge frame generation from a screen recording of the run (macOS screencapture -v), not from
+	 * the game's own images: each phase logs "[phase] start ... at <wall clock ms>" to line the recording up. Run at the
+	 * display's size with the player's settings (DLSS_WINDOW=3024x1964 MAC_FULLSCREEN=1 MAC_VSYNC=1; the test window is
+	 * 854x480 otherwise). MAC_FG_CAP=a,b picks the frame generation phases, MAC_MODES=a,b the upscaler modes, MAC_FG_ONLY=1
+	 * skips the upscaler modes.
+	 */
+	private static void macPerf(ClientGameTestContext context) {
+		boolean savedWorld = System.getenv("MAC_WORLD") != null;
+		float[] baseYaw = {YAW};
+		// Where every frame generation phase starts (one block up, flying): each one is moved back here first, so the
+		// phases don't wander off (through the room's walls) one after another.
+		double[] home = new double[4];
+		context.runOnClient(mc -> {
+			if (savedWorld) {
+				baseYaw[0] = mc.player.getYRot();
+			}
+			home[0] = mc.player.getX();
+			home[1] = mc.player.getY() + 1.0;
+			home[2] = mc.player.getZ();
+			home[3] = mc.player.getXRot();
+			// Creative, so the player can fly and stays put between phases instead of falling (the test's own copy of
+			// the world).
+			if (mc.getSingleplayerServer() != null) {
+				var server = mc.getSingleplayerServer();
+				server.execute(() -> server.getCommands().performPrefixedCommand(server.createCommandSourceStack().withSuppressedOutput(), "gamemode creative @a"));
+			}
+			// macOS throttles windows that aren't in front: bring the game's to the front.
+			org.lwjgl.sdl.SDLHints.SDL_SetHint(org.lwjgl.sdl.SDLHints.SDL_HINT_FORCE_RAISEWINDOW, "1");
+			org.lwjgl.sdl.SDLVideo.SDL_RaiseWindow(mc.getWindow().handle());
+			if (!savedWorld) {
+				mc.options.renderDistance().set(16);
+			}
+			mc.options.framerateLimit().set(260);
+			mc.options.enableVsync().set(false);
+			// No input during the test: the default "afk" limit would hold the game at 30 fps.
+			mc.options.inactivityFpsLimit().set(net.minecraft.client.InactivityFpsLimit.MINIMIZED);
+			UpscalerConfig.frameGeneration = UpscalerConfig.FrameGeneration.OFF;
+		});
+		context.waitTicks(300);
+		record Mode(String name, boolean enabled, UpscalerConfig.Upscaler upscaler, UpscalerConfig.Quality quality) {
+		}
+		UpscalerConfig.Quality perf = UpscalerConfig.Quality.PERFORMANCE;
+		Mode[] modes = {
+			new Mode("native", false, UpscalerConfig.Upscaler.METALFX, perf),
+			new Mode("metalfx 50%", true, UpscalerConfig.Upscaler.METALFX, perf),
+			new Mode("fsr 50%", true, UpscalerConfig.Upscaler.FSR, perf),
+			new Mode("metalfx spatial 50%", true, UpscalerConfig.Upscaler.METALFX_SPATIAL, perf),
+			new Mode("bilinear 50%", true, UpscalerConfig.Upscaler.BILINEAR, perf),
+			new Mode("native", false, UpscalerConfig.Upscaler.METALFX, perf),
+			new Mode("metalfx 50% sharpness 0", true, UpscalerConfig.Upscaler.METALFX, perf),
+			new Mode("fsr 50% sharpness 0", true, UpscalerConfig.Upscaler.FSR, perf)};
+		for (Mode mode : System.getenv("MAC_FG_ONLY") != null ? new Mode[0] : modes) {
+			if (System.getenv("MAC_MODES") != null && java.util.Arrays.stream(System.getenv("MAC_MODES").split(",")).noneMatch(mode.name::startsWith)) {
+				continue;
+			}
+			context.runOnClient(mc -> {
+				UpscalerConfig.enabled = mode.enabled;
+				UpscalerConfig.upscaler = mode.upscaler;
+				UpscalerConfig.quality = mode.quality;
+				UpscalerConfig.sharpness = mode.name.contains("sharpness 0") ? 0.0F : 1.0F;
+			});
+			context.waitTicks(100);
+			long[] stats = new long[3];
+			context.runOnClient(mc -> {
+				WorldUpscaler.upscaleGpuMillis();
+				for (int stage = 0; stage < 3; stage++) {
+					dev.mcupscaler.NativeBridge.takeStageMicros(stage);
+				}
+				WorldUpscaler.frameHook = () -> turn(mc, stats, 0.05F);
+			});
+			context.waitTicks(200);
+			context.runOnClient(mc -> {
+				WorldUpscaler.frameHook = null;
+				double ms = (stats[2] - stats[1]) / 1.0e6 / Math.max(1, stats[0] - 1);
+				UpscalerMod.LOGGER.info("[macperf] window {}x{}, vsync {}, limit {}, focused {}", mc.getWindow().getWidth(), mc.getWindow().getHeight(),
+					mc.options.enableVsync().get(), mc.options.framerateLimit().get(), mc.getWindow().isFocused());
+				UpscalerMod.LOGGER.info("[macperf] {}: {} fps ({} ms/frame), upscale GPU {} ms, stages us {}/{}/{}", mode.name,
+					String.format("%.1f", 1000.0 / ms), String.format("%.2f", ms), String.format("%.2f", WorldUpscaler.upscaleGpuMillis()),
+					dev.mcupscaler.NativeBridge.takeStageMicros(0), dev.mcupscaler.NativeBridge.takeStageMicros(1),
+					dev.mcupscaler.NativeBridge.takeStageMicros(2));
+			});
+		}
+
+		// Frame generation phases:
+		// - "uncapped": the camera turns at 40 degrees per second, no frame rate cap.
+		// - "look": like a player: walks back and forth (8 blocks either way, flying so it never falls) while looking left
+		//   and right (35 degrees either way, every 2.5 s). "30 look" at a 30 fps cap; "30 jitter look" adds 0-15 ms of CPU
+		//   time per frame on top, for uneven frame times like on a server.
+		for (UpscalerConfig.Upscaler upscaler : savedWorld ? new UpscalerConfig.Upscaler[] {UpscalerConfig.Upscaler.FSR}
+			: new UpscalerConfig.Upscaler[] {UpscalerConfig.Upscaler.FSR, UpscalerConfig.Upscaler.METALFX})
+		for (UpscalerConfig.FrameGeneration fg : new UpscalerConfig.FrameGeneration[] {UpscalerConfig.FrameGeneration.OFF,
+			UpscalerConfig.FrameGeneration.FSR, UpscalerConfig.FrameGeneration.METALFX}) {
+			for (String phase : fg == UpscalerConfig.FrameGeneration.OFF ? new String[] {"uncapped"} : new String[] {"uncapped", "30 look", "30 jitter look", "look"}) {
+				if (System.getenv("MAC_FG_CAP") != null && !java.util.List.of(System.getenv("MAC_FG_CAP").split(",")).contains(phase)) {
+					continue;
+				}
+				context.runOnClient(mc -> {
+					UpscalerConfig.enabled = true;
+					UpscalerConfig.upscaler = upscaler;
+					UpscalerConfig.quality = perf;
+					UpscalerConfig.frameGeneration = fg;
+					mc.options.framerateLimit().set(phase.startsWith("30 ") ? 30 : 260);
+					mc.options.enableVsync().set(System.getenv("MAC_VSYNC") != null);
+					// The option alone can already be true (copied from the player's options) while the test window is
+					// still the 854x480 default: always switch the window itself.
+					if (System.getenv("MAC_FULLSCREEN") != null && mc.getWindow().getWidth() < 1600) {
+						mc.options.fullscreen().set(true);
+						mc.getWindow().setFullscreen(false);
+						mc.getWindow().setFullscreen(true);
+					}
+				});
+				context.waitTicks(100);
+				long[] stats = new long[3];
+				long start = System.nanoTime();
+				boolean look = phase.endsWith("look");
+				boolean jitter = phase.contains("jitter");
+				java.util.Random random = new java.util.Random(1);
+				context.runOnClient(mc -> {
+					dev.mcupscaler.NativeBridge.takeStageMicros(3);
+					mc.player.getAbilities().flying = true;
+					mc.player.snapTo(home[0], home[1], home[2], baseYaw[0], (float)home[3]);
+					mc.player.setDeltaMovement(0.0, 0.0, 0.0);
+					UpscalerMod.LOGGER.info("[phase] start {} upscaler, fg {} {} at {}", upscaler, fg, phase, System.currentTimeMillis());
+					WorldUpscaler.frameHook = () -> {
+						long now = System.nanoTime();
+						if (stats[0]++ == 0) {
+							stats[1] = now;
+						}
+						stats[2] = now;
+						double seconds = (now - start) / 1.0e9;
+						if (jitter) {
+							java.util.concurrent.locks.LockSupport.parkNanos(random.nextInt(15_000_000));
+						}
+						float yaw;
+						if (look) {
+							double sideways = Math.toRadians(baseYaw[0] + 90.0), d = 8.0 * Math.sin(seconds * 2.0 * Math.PI / 12.0);
+							double x = home[0] + Math.cos(sideways) * d, z = home[2] + Math.sin(sideways) * d;
+							mc.player.setPos(x, home[1], z);
+							mc.player.xo = x;
+							mc.player.yo = home[1];
+							mc.player.zo = z;
+							mc.player.setDeltaMovement(0.0, 0.0, 0.0);
+							yaw = baseYaw[0] + 35.0F * (float)Math.sin(seconds * 2.0 * Math.PI / 2.5);
+						} else {
+							yaw = baseYaw[0] + 40.0F * (float)seconds;
+						}
+						mc.player.setYRot(yaw);
+						mc.player.yRotO = yaw;
+					};
+				});
+				context.waitTicks(160);
+				context.runOnClient(mc -> {
+					WorldUpscaler.frameHook = null;
+					double ms = (stats[2] - stats[1]) / 1.0e6 / Math.max(1, stats[0] - 1);
+					UpscalerMod.LOGGER.info("[macperf] {} upscaler, fg {} {}: {} rendered fps; {}; frame gen GPU {} us; focused {}", upscaler, fg, phase,
+						String.format("%.1f", 1000.0 / ms), dev.mcupscaler.UpscalerDebugEntry.frameGenLine(),
+						dev.mcupscaler.NativeBridge.takeStageMicros(3), mc.getWindow().isFocused());
+				});
+				context.waitTicks(40);
+			}
+		}
+		context.runOnClient(mc -> UpscalerConfig.frameGeneration = UpscalerConfig.FrameGeneration.OFF);
+		context.waitTicks(20);
+	}
+
+	private static void turn(net.minecraft.client.Minecraft mc, long[] stats, float degreesPerFrame) {
+		long now = System.nanoTime();
+		if (stats[0]++ == 0) {
+			stats[1] = now;
+		}
+		stats[2] = now;
+		float yaw = YAW + degreesPerFrame * stats[0];
+		mc.player.setYRot(yaw);
+		mc.player.yRotO = yaw;
 	}
 
 	/** Frame generation (DLSS_FG=1): rendered frame rates at a 60 fps cap and uncapped, with DLAA and without upscaling. */
