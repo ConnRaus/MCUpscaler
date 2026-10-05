@@ -1,31 +1,36 @@
 {
 	"schemaVersion": 1,
-	"id": "dlssmc",
+	"id": "mcupscaler",
 	"version": "${version}",
-	"name": "DLSS",
-	"description": "NVIDIA DLSS 4 Super Resolution (transformer model) and DLAA for Minecraft on Windows. Renders the world at a lower resolution while the HUD stays sharp. Needs the Vulkan graphics backend and an NVIDIA RTX GPU.",
+	"name": "MCUpscaler",
+	"description": "Upscaling and frame generation for Minecraft. Windows: NVIDIA DLSS 4 (Super Resolution, Frame Generation, Reflex) and AMD FSR 3.1. macOS: Apple MetalFX and AMD FSR 3.1. Renders the world at a lower resolution while the HUD stays sharp. Needs the Vulkan graphics backend.",
 	"authors": [
 		"ConnRaus"
 	],
 	"license": "MIT",
-	"icon": "assets/dlssmc/icon.png",
+	"icon": "assets/mcupscaler/icon.png",
 	"environment": "client",
 	"entrypoints": {
 		"client": [
-			"dev.dlssmc.DlssMod"
+			"dev.mcupscaler.UpscalerMod"
 		],
 		"sodium:config_api_user": [
-			"dev.dlssmc.SodiumOptions"
+			"dev.mcupscaler.SodiumOptions"
 		]
 	},
 	"mixins": [
-		"dlssmc.mixins.json"
+		"mcupscaler.mixins.json"
 	],
 	"depends": {
 		"fabricloader": ">=0.19.5",
 		"minecraft": "~26.3",
 		"java": ">=25",
 		"fabric-api": "*"
+	},
+	"breaks": {
+		"dlssmc": "*",
+		"metalfx": "*",
+		"upscalermc": "*"
 	},
 	"suggests": {
 		"sodium": "*"

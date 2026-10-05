@@ -2,7 +2,7 @@ plugins {
 	id 'net.fabricmc.fabric-loom' version "${loom_version}"
 }
 
-version = project.version
+version = "${project.version}+mc${project.minecraft_version}"
 group = project.group
 
 repositories {
@@ -14,7 +14,7 @@ repositories {
 }
 
 base {
-	archivesName = 'dlssmc'
+	archivesName = 'mcupscaler'
 }
 
 dependencies {
@@ -35,7 +35,7 @@ dependencies {
 fabricApi {
 	configureTests {
 		createSourceSet = true
-		modId = "dlssmc-test"
+		modId = "mcupscaler-test"
 		enableGameTests = false
 		enableClientGameTests = true
 		eula = true
@@ -60,7 +60,7 @@ loom {
 			def (w, h) = project.property('testWindow').split('x')
 			programArgs "--width", w, "--height", h
 		}
-		// -PtestJvmArgs="-Ddlssmc.skipNgx=true -Ddlssmc.ngxLogging=true": debugging switches for the game test.
+		// -PtestJvmArgs="-Dmcupscaler.skipNgx=true -Dmcupscaler.ngxLogging=true": debugging switches for the game test.
 		if (project.hasProperty('testJvmArgs')) {
 			vmArgs project.property('testJvmArgs').split(' ')
 		}
@@ -68,35 +68,79 @@ loom {
 }
 
 // ---------------------------------------------------------------------------
-// Native bridge: dlss_bridge.dll (MSVC, links NVIDIA's NGX SDK statically), bundled into the jar under
-// /natives/windows-x64 together with NVIDIA's DLSS libraries and AMD's FidelityFX (FSR 3.1) library, which the bridge
-// loads at runtime. The SDKs live in _deps (see README).
+// Native bridges, bundled into the jar under /natives:
+// - Windows: dlss_bridge.dll (MSVC, links NVIDIA's NGX SDK statically) under /natives/windows-x64, with NVIDIA's DLSS
+//   libraries and AMD's FidelityFX (FSR 3.1) library, which the bridge loads at runtime. The SDKs live in _deps (see
+//   README). Built only on Windows; elsewhere the DLLs come from prebuilt/natives/windows-x64 if present.
+// - macOS: libmetalfx_bridge.dylib (Objective-C, MetalFX + the Metal port of FSR 3.1), a universal binary. Built with
+//   Xcode's command line tools on a Mac; elsewhere the committed prebuilt/natives/libmetalfx_bridge.dylib is used.
 // ---------------------------------------------------------------------------
+def isWindows = System.getProperty('os.name').toLowerCase(Locale.ROOT).contains('windows')
+def isMac = System.getProperty('os.name').toLowerCase(Locale.ROOT).contains('mac')
 def dlssSdk = providers.environmentVariable('DLSS_SDK').orElse(file('_deps/dlss-sdk').absolutePath).get()
 def ffxSdk = providers.environmentVariable('FFX_SDK').orElse(file('_deps/ffx-sdk').absolutePath).get()
-def nativeOutDir = layout.buildDirectory.dir('native/natives/windows-x64')
+def nativeRoot = layout.buildDirectory.dir('native')
+def windowsOutDir = layout.buildDirectory.dir('native/natives/windows-x64')
+def macOutDir = layout.buildDirectory.dir('native/natives')
 
-tasks.register('buildNative', Exec) {
-	inputs.dir('src/native')
+tasks.register('buildNativeWindows', Exec) {
+	onlyIf { isWindows }
+	inputs.dir('src/native/windows')
 	inputs.file('tools/build_native.bat')
-	outputs.dir(nativeOutDir)
-	commandLine 'cmd', '/c', file('tools/build_native.bat').absolutePath, nativeOutDir.get().asFile.absolutePath
+	outputs.dir(windowsOutDir)
+	commandLine 'cmd', '/c', file('tools/build_native.bat').absolutePath, windowsOutDir.get().asFile.absolutePath
 }
 
 tasks.register('copyDlssLibraries', Copy) {
+	onlyIf { isWindows }
 	from("${dlssSdk}/lib/Windows_x86_64/rel") {
 		include 'nvngx_dlss.dll', 'nvngx_dlssg.dll'
 	}
 	from("${ffxSdk}/PrebuiltSignedDLL") {
 		include 'amd_fidelityfx_vk.dll'
 	}
-	into(nativeOutDir)
+	into(windowsOutDir)
+}
+
+tasks.register('buildNativeMac', Exec) {
+	onlyIf { isMac }
+	inputs.dir('src/native/mac')
+	def out = macOutDir.get().file('libmetalfx_bridge.dylib').asFile
+	outputs.file(out)
+	doFirst { out.parentFile.mkdirs() }
+	commandLine 'xcrun', 'clang',
+		'-dynamiclib', '-fobjc-arc', '-O2', '-Wall',
+		'-arch', 'arm64', '-arch', 'x86_64',
+		'-mmacosx-version-min=13.0',
+		'-framework', 'Foundation', '-framework', 'Metal', '-framework', 'MetalFX', '-framework', 'QuartzCore', '-framework', 'AppKit',
+		'-framework', 'ImageIO', '-framework', 'CoreGraphics',
+		'-install_name', '@rpath/libmetalfx_bridge.dylib',
+		'-o', out.absolutePath,
+		file('src/native/mac/metalfx_bridge.m').absolutePath
+}
+
+tasks.register('buildNative') {
+	dependsOn 'buildNativeWindows', 'copyDlssLibraries', 'buildNativeMac'
 }
 
 processResources {
-	dependsOn 'buildNative', 'copyDlssLibraries'
-	from(layout.buildDirectory.dir('native')) {
-		include 'natives/**/*.dll'
+	dependsOn 'buildNative'
+	// Natives built on this machine win over the prebuilt ones.
+	duplicatesStrategy = DuplicatesStrategy.EXCLUDE
+	from(nativeRoot) {
+		include 'natives/**/*.dll', 'natives/*.dylib'
+	}
+	from('prebuilt') {
+		include 'natives/**/*.dll', 'natives/*.dylib'
+	}
+	doLast {
+		def natives = file("${destinationDir}/natives")
+		if (!new File(natives, 'windows-x64/dlss_bridge.dll').exists()) {
+			logger.warn('No Windows native bridge in this jar: DLSS and FSR will be unavailable on Windows (build on Windows, see README).')
+		}
+		if (!new File(natives, 'libmetalfx_bridge.dylib').exists()) {
+			logger.warn('No macOS native bridge in this jar: MetalFX and FSR will be unavailable on macOS (build on a Mac, see README).')
+		}
 	}
 
 	def version = project.version
@@ -123,7 +167,7 @@ tasks.register('deployToInstance', Copy) {
 		throw new GradleException('Set instance_mods_dir to the mods folder to deploy to')
 	}))
 	doFirst {
-		// Remove older builds of this mod from the instance
-		fileTree(project.property('instance_mods_dir')).matching { include 'dlssmc-*.jar' }.each { it.delete() }
+		// Remove older builds of this mod (and of the DLSS and MetalFX mods it replaces) from the instance
+		fileTree(project.property('instance_mods_dir')).matching { include 'mcupscaler-*.jar', 'upscalermc-*.jar', 'dlssmc-*.jar', 'metalfx-*.jar' }.each { it.delete() }
 	}
 }

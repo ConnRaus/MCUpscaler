@@ -1,0 +1,8 @@
+{
+	"key.category.mcupscaler.mcupscaler": "MCUpscaler",
+	"key.mcupscaler.toggle": "Toggle upscaling",
+	"key.mcupscaler.cycle_upscaler": "Next upscaler",
+	"key.mcupscaler.cycle_quality": "Next quality mode",
+	"key.mcupscaler.cycle_preset": "Next DLSS preset",
+	"key.mcupscaler.frame_generation": "Next frame generation mode"
+}
