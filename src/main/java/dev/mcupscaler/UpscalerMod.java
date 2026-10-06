@@ -4,8 +4,10 @@ import com.mojang.blaze3d.platform.InputConstants;
 import net.fabricmc.api.ClientModInitializer;
 import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
 import net.fabricmc.fabric.api.client.keymapping.v1.KeyMappingHelper;
+import net.minecraft.ChatFormatting;
 import net.minecraft.client.KeyMapping;
 import net.minecraft.client.Minecraft;
+import net.minecraft.client.player.LocalPlayer;
 import net.minecraft.network.chat.Component;
 import net.minecraft.resources.Identifier;
 import org.slf4j.Logger;
@@ -21,6 +23,8 @@ public class UpscalerMod implements ClientModInitializer {
 	/** Windows only (DLSS presets), else null. */
 	private static KeyMapping cyclePresetKey;
 	private static KeyMapping frameGenKey;
+	/** The player last told in chat that the mod needs Vulkan: once per world joined. */
+	private static LocalPlayer warnedPlayer;
 
 	@Override
 	public void onInitializeClient() {
@@ -45,6 +49,7 @@ public class UpscalerMod implements ClientModInitializer {
 	private static void onTick(Minecraft minecraft) {
 		VitrailCompat.tick();
 		UpscalerDebugEntry.enableOnce(minecraft);
+		warnIfNotVulkan(minecraft);
 		boolean changed = false;
 		while (toggleKey.consumeClick()) {
 			UpscalerConfig.enabled = !UpscalerConfig.enabled;
@@ -86,6 +91,17 @@ public class UpscalerMod implements ClientModInitializer {
 				minecraft.player.sendOverlayMessage(Component.literal(statusLine()));
 			}
 		}
+	}
+
+	/** On OpenGL the mod does nothing: says so in chat on joining a world. */
+	private static void warnIfNotVulkan(Minecraft minecraft) {
+		LocalPlayer player = minecraft.player;
+		if (player == null || player == warnedPlayer || !WorldUpscaler.needsVulkan()) {
+			return;
+		}
+		warnedPlayer = player;
+		player.sendSystemMessage(Component.literal("MCUpscaler requires Vulkan! Set Graphics API to \"Prefer Vulkan (Experimental)\" under Options -> Video Settings and restart the game.")
+			.withStyle(ChatFormatting.RED));
 	}
 
 	/** The overlay message after a key changed a setting: the upscaling mode and whether frame generation is on. */
