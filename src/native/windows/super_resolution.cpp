@@ -36,9 +36,11 @@ struct Frame {
     float sharpness;        // 376 FSR's sharpening, 0..1 (0 = off)
     float fovY;             // 380 vertical field of view, radians
     float nearZ;            // 384 near plane
-    uint32_t pad;           // 388
+    uint32_t handMotion;    // 388 bits: the right (1) / left (2) arm's matrices are valid; the hands get their own motion vectors
+    float handClipToLocal[2][16];     // 392 per arm: inverse(hand projection * model-view * arm pose), unjittered
+    float prevHandLocalToClip[2][16]; // 520 per arm: the previous frame's hand projection * model-view * arm pose
 };
-static_assert(sizeof(Frame) == 392, "Frame layout");
+static_assert(sizeof(Frame) == 648, "Frame layout");
 
 enum Upscaler : uint32_t { UPSCALER_NONE = 0, UPSCALER_DLSS = 1, UPSCALER_FSR = 2 };
 
@@ -52,8 +54,9 @@ struct MotionPush {
     float objDelta[4];
     uint32_t zZeroToOne;
     uint32_t boxCount;
+    uint32_t handMotion;
 };
-static_assert(sizeof(MotionPush) == 200, "MotionPush layout");
+static_assert(sizeof(MotionPush) == 204, "MotionPush layout");
 
 // ------------------------------------------------------------------------------------------------ GPU timing
 
@@ -124,7 +127,9 @@ static OwnedImage gOutput;    // DLSS output (storage image) at the output resol
 static OwnedImage gPost;      // gOutput with the shader pack's vignette
 static OwnedImage gExposure;  // 1x1 R32F, 1.0: the colour is display-ready LDR (see ensureDlss)
 static constexpr uint32_t kMaxBoxes = 64;
-OwnedImage *gLastOutput; // gOutput or gPost
+static constexpr uint32_t kHandMatrixBytes = 256; // the box buffer starts with the hands' four matrices
+OwnedImage *gLastWorld;
+VignetteParams gLastVignette;
 static NVSDK_NGX_Handle *gDlss;
 static uint32_t gDlssInW, gDlssInH, gDlssOutW, gDlssOutH, gDlssQuality, gDlssPreset;
 static VkFormat gDlssOutFormat;
@@ -175,7 +180,7 @@ static bool ensureDlss(VkCommandBuffer cb, const Frame &f, VkFormat outFormat) {
 }
 
 // Copies (same format) or blits (other format) a w x h colour image; both in GENERAL layout.
-static void copyImage(VkCommandBuffer cb, VkImage src, VkFormat srcFormat, VkImage dst, VkFormat dstFormat, uint32_t w, uint32_t h) {
+void copyImage(VkCommandBuffer cb, VkImage src, VkFormat srcFormat, VkImage dst, VkFormat dstFormat, uint32_t w, uint32_t h) {
     if (srcFormat == dstFormat) {
         VkImageCopy copy{};
         copy.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
@@ -201,7 +206,7 @@ static int evaluateFsr(VkCommandBuffer cb, const Frame &f);
 
 // Records the motion vector pass into commandBuffer and, with f->upscaler, DLSS Super Resolution or FSR writing into
 // f->output. Without upscaling (Frame Generation at the native resolution) only the motion vectors and depth are made,
-// and the world image is kept as Frame Generation's hudless image.
+// and the world image is kept for Frame Generation to interpolate.
 // Returns 1 on success, 0 if this frame failed (see dlss_last_error), -1 if the upscaler is unusable.
 EXPORT int dlss_upscale(uint64_t commandBuffer, const Frame *f) {
     uint32_t upscaler = f->upscaler;
@@ -218,6 +223,8 @@ EXPORT int dlss_upscale(uint64_t commandBuffer, const Frame *f) {
         setError("FSR unavailable (amd_fidelityfx_vk.dll not loaded)");
         return -1;
     }
+    gLastWorld = nullptr;
+    gLastVignette = {};
     VkCommandBuffer cb = (VkCommandBuffer)commandBuffer;
     uint32_t inW = f->color.width, inH = f->color.height, outW = f->output.width, outH = f->output.height;
     if (inW == 0 || inH == 0 || outW < 32 || outH < 32 || f->depth.width != inW || f->depth.height != inH
@@ -235,9 +242,9 @@ EXPORT int dlss_upscale(uint64_t commandBuffer, const Frame *f) {
         || !ensureImage(gDlssDepth, VK_FORMAT_R32_SFLOAT, inW, inH, sampledStorage | transfer, "DLSS depth")
         || !ensureImage(gBiasMask, VK_FORMAT_R8_UNORM, inW, inH, sampledStorage, "DLSS current-colour bias mask")
         || !ensureImage(gOutput, outFormat, outW, outH, sampledStorage | transfer, "DLSS output")
-        || (upscale && f->vignette && !ensureImage(gPost, outFormat, outW, outH, sampledStorage | transfer, "vignetted output"))
+        || (f->vignette && !ensureImage(gPost, outFormat, outW, outH, sampledStorage | transfer, "vignetted output"))
         || (upscaler == UPSCALER_DLSS && !ensureImage(gExposure, VK_FORMAT_R32_SFLOAT, 1, 1, VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT, "DLSS exposure"))
-        || !ensureBuffer(gBoxBuffer, kMaxBoxes * 48)) {
+        || !ensureBuffer(gBoxBuffer, kHandMatrixBytes + kMaxBoxes * 48)) {
         return 0;
     }
     uint32_t boxCount = f->boxes ? (f->boxCount < kMaxBoxes ? f->boxCount : kMaxBoxes) : 0;
@@ -257,10 +264,16 @@ EXPORT int dlss_upscale(uint64_t commandBuffer, const Frame *f) {
         VkImageSubresourceRange range{VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
         p_vkCmdClearColorImage(cb, gExposure.image, VK_IMAGE_LAYOUT_GENERAL, &one, 1, &range);
     }
-    if (boxCount) {
-        p_vkCmdUpdateBuffer(cb, gBoxBuffer.buffer, 0, boxCount * 48, (const void *)f->boxes);
-        globalBarrier(cb);
+    if (f->handMotion) {
+        float hand[64];
+        memcpy(hand, f->handClipToLocal, sizeof(f->handClipToLocal));
+        memcpy(hand + 32, f->prevHandLocalToClip, sizeof(f->prevHandLocalToClip));
+        p_vkCmdUpdateBuffer(cb, gBoxBuffer.buffer, 0, kHandMatrixBytes, hand);
     }
+    if (boxCount) {
+        p_vkCmdUpdateBuffer(cb, gBoxBuffer.buffer, kHandMatrixBytes, boxCount * 48, (const void *)f->boxes);
+    }
+    if (f->handMotion || boxCount) globalBarrier(cb);
 
     MotionPush push{};
     memcpy(push.invViewProj, f->invViewProj, sizeof(push.invViewProj));
@@ -271,6 +284,7 @@ EXPORT int dlss_upscale(uint64_t commandBuffer, const Frame *f) {
     memcpy(push.objDelta, f->objDelta, sizeof(push.objDelta));
     push.zZeroToOne = f->zZeroToOne;
     push.boxCount = boxCount;
+    push.handMotion = f->handMotion;
     Resource motionRes[6] = {{(VkImageView)f->depth.view}, {(VkImageView)f->hand.view}, {gMotion.view}, {gDlssDepth.view},
         {VK_NULL_HANDLE, gBoxBuffer.buffer}, {gBiasMask.view}};
     dispatch(cb, PASS_MOTION, motionRes, &push, sizeof(push), inW, inH);
@@ -278,10 +292,20 @@ EXPORT int dlss_upscale(uint64_t commandBuffer, const Frame *f) {
     stamp(cb, 1);
 
     if (!upscale) {
-        // Minecraft's target holds the world without the HUD right now: Frame Generation's hudless image.
+        // Minecraft's target holds the world without the HUD right now: what Frame Generation interpolates.
         copyImage(cb, (VkImage)f->color.image, (VkFormat)f->color.format, gOutput.image, gOutput.format, outW, outH);
         globalBarrier(cb);
-        gLastOutput = &gOutput;
+        gLastWorld = &gOutput;
+        if (f->vignette) {
+            // The shader pack's vignette, taken out of the pack so that frame generation doesn't move it: drawn back here.
+            Resource postRes[2] = {{gOutput.view}, {gPost.view}};
+            struct { uint32_t kind; float a, b; } post = {f->vignette, f->vignetteA, f->vignetteB};
+            dispatch(cb, PASS_POST, postRes, &post, sizeof(post), outW, outH);
+            globalBarrier(cb);
+            copyToTarget(cb, gPost, f->output);
+            globalBarrier(cb);
+            gLastVignette = {f->vignette, f->vignetteA, f->vignetteB};
+        }
         stamp(cb, 2);
         stamp(cb, 3);
         return 1;
@@ -300,11 +324,11 @@ EXPORT int dlss_upscale(uint64_t commandBuffer, const Frame *f) {
         dispatch(cb, PASS_POST, postRes, &post, sizeof(post), outW, outH);
         globalBarrier(cb);
         copyToTarget(cb, gPost, f->output);
-        gLastOutput = &gPost;
+        gLastVignette = {f->vignette, f->vignetteA, f->vignetteB};
     } else {
         copyToTarget(cb, gOutput, f->output);
-        gLastOutput = &gOutput;
     }
+    gLastWorld = &gOutput;
     globalBarrier(cb);
     stamp(cb, 3);
     return 1;

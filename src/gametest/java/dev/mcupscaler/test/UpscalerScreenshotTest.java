@@ -60,12 +60,14 @@ public class UpscalerScreenshotTest implements FabricClientGameTest {
 			});
 			context.waitTicks(600);
 			// "user": the settings from config/mcupscaler.properties as they are.
-			Object[][] modes = {{"user", null, null}, {"native", false, UpscalerConfig.Quality.QUALITY},
-				{"dlss_quality", true, UpscalerConfig.Quality.QUALITY}};
+			UpscalerConfig.Upscaler dlss = UpscalerConfig.Upscaler.DLSS;
+			Object[][] modes = {{"user", null, null, null}, {"native", false, dlss, UpscalerConfig.Quality.QUALITY},
+				{"dlss_quality", true, dlss, UpscalerConfig.Quality.QUALITY},
+				{"fsr_quality", true, UpscalerConfig.Upscaler.FSR, UpscalerConfig.Quality.QUALITY}};
 			for (Object[] mode : modes) {
 				String name = (String) mode[0];
 				if (mode[1] != null) {
-					configure(context, name, (boolean) mode[1], UpscalerConfig.Upscaler.DLSS, (UpscalerConfig.Quality) mode[2]);
+					configure(context, name, (boolean) mode[1], (UpscalerConfig.Upscaler) mode[2], (UpscalerConfig.Quality) mode[3]);
 					context.runOnClient(mc -> UpscalerConfig.frameGeneration = UpscalerConfig.FrameGeneration.OFF);
 				} else {
 					context.runOnClient(mc -> UpscalerMod.LOGGER.info("[test] user settings -> {}", UpscalerMod.statusLine()));
@@ -97,6 +99,10 @@ public class UpscalerScreenshotTest implements FabricClientGameTest {
 					context.takeScreenshot("f_" + name + "_" + i);
 					context.waitTicks(3);
 				}
+			}
+			// DLSS_SAVE_QUICK: only the shots above.
+			if (System.getenv("DLSS_SAVE_QUICK") != null) {
+				return;
 			}
 			// The vignette while turning (it should stay at the screen edges).
 			configure(context, "v_turn", true, UpscalerConfig.Upscaler.DLSS, UpscalerConfig.Quality.QUALITY);
@@ -244,6 +250,10 @@ public class UpscalerScreenshotTest implements FabricClientGameTest {
 				}
 				if (System.getenv("DLSS_BENCH") != null) {
 					benchmark(context);
+					return;
+				}
+				if (System.getenv("DLSS_SHAKE") != null) {
+					shake(context);
 					return;
 				}
 				if (System.getenv("DLSS_FG") != null) {
@@ -603,6 +613,119 @@ public class UpscalerScreenshotTest implements FabricClientGameTest {
 		}
 		context.runOnClient(mc -> UpscalerConfig.frameGeneration = UpscalerConfig.FrameGeneration.OFF);
 		context.waitTicks(20);
+	}
+
+	/**
+	 * Frame generation under a shaking camera (DLSS_SHAKE=1): 60 fps cap (DLSS_SHAKE_FPS), the player walking back and forth (hand bobbing)
+	 * with a sword, each phase recorded off the screen with ffmpeg at 144 fps (build/run/clientGameTest/shake_*.mp4) so
+	 * the generated frames are in the video. DLSS_SHAKE=fsr,dlss picks the frame generators (default: fsr).
+	 */
+	/** DLSS_SHAKE_FPS: the frame cap while shaking (default 60; lower makes frame generation's artifacts bigger). */
+	private static final int SHAKE_FPS = System.getenv("DLSS_SHAKE_FPS") != null ? Integer.parseInt(System.getenv("DLSS_SHAKE_FPS")) : 60;
+
+	private static void shake(ClientGameTestContext context) {
+		// A flat snow field: the hand and the screen edges against bright white, nothing next to the camera.
+		// (fill is limited to 32768 blocks a command.)
+		for (int y = 0; y < 32; y += 4) {
+			server.runCommand("execute at @p run fill ~-40 ~" + y + " ~-40 ~40 ~" + (y + 3) + " ~40 minecraft:air");
+		}
+		server.runCommand("execute at @p run fill ~-40 ~-1 ~-40 ~40 ~-1 ~40 minecraft:snow_block");
+		// The fill breaks trees and grass: their drops (leaf litter etc.) go, and nothing picked up stays in the hand.
+		server.runCommand("kill @e[type=!player]");
+		server.runCommand("clear @a");
+		// DLSS_SHAKE_ITEM / DLSS_SHAKE_OFFHAND: what the player holds (default: nothing, the bare arm).
+		Runnable give = () -> {
+			for (String[] slot : new String[][] {{"DLSS_SHAKE_ITEM", "mainhand"}, {"DLSS_SHAKE_OFFHAND", "offhand"}}) {
+				String item = System.getenv(slot[0]);
+				if (item != null && !item.equals("air")) {
+					server.runCommand("item replace entity @a weapon." + slot[1] + " with minecraft:" + item);
+				}
+			}
+		};
+		give.run();
+		server.runCommand("time set 6000");
+		server.runCommand("gamerule advance_time false");
+		context.runOnClient(mc -> {
+			mc.options.enableVsync().set(false);
+			mc.options.framerateLimit().set(SHAKE_FPS);
+			mc.options.bobView().set(true);
+		});
+		context.waitTicks(100);
+		// Leaves left without their logs decay meanwhile and drop saplings: cleared again.
+		server.runCommand("kill @e[type=!player]");
+		server.runCommand("clear @a");
+		give.run();
+		String which = System.getenv("DLSS_SHAKE");
+		java.util.List<String> phases = new java.util.ArrayList<>();
+		for (String fg : (which.equals("1") ? "fsr" : which).split(",")) {
+			phases.add("fg only, " + fg + " fg");
+			phases.add("fsr quality, " + fg + " fg");
+		}
+		for (String phase : phases) {
+			context.runOnClient(mc -> {
+				UpscalerConfig.enabled = !phase.startsWith("fg only");
+				UpscalerConfig.upscaler = UpscalerConfig.Upscaler.FSR;
+				UpscalerConfig.quality = UpscalerConfig.Quality.QUALITY;
+				UpscalerConfig.frameGeneration = phase.endsWith("dlss fg") ? UpscalerConfig.FrameGeneration.DLSS : UpscalerConfig.FrameGeneration.FSR;
+			});
+			context.waitTicks(60);
+			long[] frames = new long[1];
+			context.runOnClient(mc -> WorldUpscaler.frameHook = () -> {
+				// A shake: fast yaw and pitch swings (tens of degrees), as when whipping the mouse around.
+				double t = frames[0]++ / (double)SHAKE_FPS;
+				float yaw = YAW + (float)(30.0 * Math.sin(t * 2.0 * Math.PI * 1.3) + 10.0 * Math.sin(t * 2.0 * Math.PI * 3.1));
+				float pitchNow = pitch + (float)(12.0 * Math.sin(t * 2.0 * Math.PI * 1.7) + 5.0 * Math.sin(t * 2.0 * Math.PI * 4.3));
+				mc.player.setYRot(yaw);
+				mc.player.setXRot(pitchNow);
+				// DLSS_SHAKE_SWING: swing the arm a couple of times a second as well.
+				if (System.getenv("DLSS_SHAKE_SWING") != null && frames[0] % (SHAKE_FPS / 2) == 0) {
+					mc.player.swing(net.minecraft.world.InteractionHand.MAIN_HAND, net.minecraft.world.item.component.SwingAnimation.DEFAULT, false);
+				}
+			});
+			Process ffmpeg = context.computeOnClient(mc -> startRecording(mc, "shake_" + phase.replace(", ", "_").replace(' ', '_')));
+			for (int i = 0; i < 4; i++) {
+				context.getInput().holdKeyFor(options -> options.keyUp, 20);
+				context.getInput().holdKeyFor(options -> options.keyDown, 20);
+			}
+			context.runOnClient(mc -> {
+				WorldUpscaler.frameHook = null;
+				UpscalerMod.LOGGER.info("[shake] {}: {} fps; {}; {}", phase, mc.getFps(), UpscalerMod.statusLine(),
+					dev.mcupscaler.UpscalerDebugEntry.frameGenLine());
+			});
+			if (ffmpeg != null) {
+				try {
+					ffmpeg.waitFor(30, java.util.concurrent.TimeUnit.SECONDS);
+				} catch (InterruptedException e) {
+					Thread.currentThread().interrupt();
+				}
+			}
+		}
+		context.runOnClient(mc -> UpscalerConfig.frameGeneration = UpscalerConfig.FrameGeneration.OFF);
+		context.waitTicks(20);
+	}
+
+	/** Records the game window's area of the screen for 7 s (ffmpeg's Desktop Duplication grabber), or null. */
+	private static Process startRecording(net.minecraft.client.Minecraft mc, String name) {
+		int[] x = new int[1], y = new int[1];
+		try (org.lwjgl.system.MemoryStack stack = org.lwjgl.system.MemoryStack.stackPush()) {
+			java.nio.IntBuffer px = stack.mallocInt(1), py = stack.mallocInt(1);
+			org.lwjgl.sdl.SDLVideo.SDL_GetWindowPosition(mc.getWindow().handle(), px, py);
+			x[0] = px.get(0);
+			y[0] = py.get(0);
+		}
+		int w = mc.getWindow().getWidth() & ~1, h = mc.getWindow().getHeight() & ~1;
+		java.io.File out = new java.io.File(name + ".mp4").getAbsoluteFile();
+		String grab = "ddagrab=output_idx=0:framerate=144:draw_mouse=0:video_size=" + w + "x" + h + ":offset_x=" + x[0] + ":offset_y=" + y[0];
+		try {
+			Process process = new ProcessBuilder("ffmpeg", "-y", "-loglevel", "error", "-f", "lavfi", "-i", grab, "-t", "7",
+				"-c:v", "h264_nvenc", "-rc", "constqp", "-qp", "14", out.getPath())
+				.redirectErrorStream(true).redirectOutput(new java.io.File(name + ".ffmpeg.log")).start();
+			UpscalerMod.LOGGER.info("[shake] recording {} at {},{} {}x{}", out, x[0], y[0], w, h);
+			return process;
+		} catch (java.io.IOException e) {
+			UpscalerMod.LOGGER.warn("[shake] could not start ffmpeg", e);
+			return null;
+		}
 	}
 
 	/** AMD FSR upscaling and frame generation (DLSS_FSR=1): stills, a turn, then FSR frame generation with and without upscaling. */

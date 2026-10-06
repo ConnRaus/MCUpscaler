@@ -93,6 +93,11 @@ public final class FrameGen {
 		return running;
 	}
 
+	/** Frame generation is switched on and able to run (render thread). */
+	public static boolean isWanted() {
+		return wanted();
+	}
+
 	/** Independent of upscaling: without it, the motion vectors and depth are made at the native resolution. */
 	private static boolean wanted() {
 		UpscalerConfig.FrameGeneration backend = UpscalerConfig.frameGeneration;

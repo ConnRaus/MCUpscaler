@@ -109,7 +109,7 @@ bool ensureBuffer(OwnedBuffer &buf, VkDeviceSize size);
 NVSDK_NGX_Resource_VK resourceOf(uint64_t image, uint64_t view, VkFormat format, uint32_t w, uint32_t h, bool readWrite);
 
 // The compute passes (GLSL in Shaders.java), in the order Java hands them over.
-enum PassId { PASS_MOTION = 0,PASS_PACK_MERGE, PASS_DISTANT_MERGE, PASS_POST, PASS_COUNT };
+enum PassId { PASS_MOTION = 0, PASS_PACK_MERGE, PASS_DISTANT_MERGE, PASS_POST, PASS_FG_COMPOSITE, PASS_COUNT };
 
 // One binding of a pass: an image view or a buffer, as the pass's layout says.
 struct Resource {
@@ -143,7 +143,17 @@ static_assert(sizeof(Tex) == 32, "Tex layout");
 // without DLSS Super Resolution.
 extern OwnedImage gMotion;       // RG16F motion vectors at the render resolution
 extern OwnedImage gDlssDepth;    // R32F depth at the render resolution
-extern OwnedImage *gLastOutput;  // the world at the output resolution, without the HUD (Frame Generation's hudless image)
+// This frame's world at the output resolution, without the HUD or the shader pack's vignette (what frame generation
+// interpolates; null until dlss_upscale made it), and the vignette dlss_upscale drew over it.
+extern OwnedImage *gLastWorld;
+struct VignetteParams {
+    uint32_t kind;
+    float a, b;
+};
+extern VignetteParams gLastVignette;
+
+// Copies (or, between formats, blits) a w x h colour image; both in VK_IMAGE_LAYOUT_GENERAL.
+void copyImage(VkCommandBuffer cb, VkImage src, VkFormat srcFormat, VkImage dst, VkFormat dstFormat, uint32_t w, uint32_t h);
 
 void initTiming();
 void srShutdown();
@@ -190,8 +200,8 @@ struct FsrUpscale {
 int fsrUpscale(VkCommandBuffer cb, const FsrUpscale &u);
 
 // Records FSR frame generation into cb: the frame between the previous backbuffer and this one into output. backbuffer:
-// the final frame (with the HUD); hudless: the same without the HUD (may be null); depth and motion vectors are this
-// frame's (gDlssDepth, gMotion). frameId must grow by one per frame (any other step resets FSR's history).
+// the image to interpolate; hudless: the same without the HUD (may be null); depth and motion vectors are this frame's
+// (gDlssDepth, gMotion). frameId must grow by one per frame (any other step resets FSR's history).
 // Returns true if output holds a generated frame.
 bool fsrFrameGen(VkCommandBuffer cb, uint64_t frameId, bool reset, float frameTimeMs, const OwnedImage &backbuffer,
                  const OwnedImage *hudless, const OwnedImage &output, const FgCamera &camera);

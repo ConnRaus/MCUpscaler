@@ -170,11 +170,13 @@ final class DepthCapture {
 	}
 
 	/**
-	 * Distant Horizons terrain drawn by a shader pack has its own depth buffer and leaves the world depth at sky: without
-	 * this it gets camera rotation but no camera movement in its motion vectors (smears while flying).
+	 * Distant Horizons terrain (drawn by a shader pack, or by Distant Horizons itself) has its own depth buffer and leaves
+	 * the world depth at sky: without this it gets camera rotation but no camera movement in its motion vectors (floats and
+	 * smears while moving).
 	 */
 	private void mergeDistantDepth() {
-		GpuTexture distant = VitrailCompat.distantDepth(distantPair);
+		GpuTexture packDistant = VitrailCompat.distantDepth(distantPair);
+		GpuTexture distant = packDistant != null ? packDistant : DistantHorizonsDepth.take(distantPair);
 		if (distant == null) {
 			return;
 		}
@@ -193,7 +195,8 @@ final class DepthCapture {
 			UpscalerMod.LOGGER.warn("Could not merge the Distant Horizons depth: {}", lastError());
 		} else if (result == 1 && !loggedDistantMerge) {
 			loggedDistantMerge = true;
-			UpscalerMod.LOGGER.info("Merging the shader pack's Distant Horizons depth (far = {} * world + {})", distantPair.x, distantPair.y);
+			UpscalerMod.LOGGER.info("Merging the {} Distant Horizons depth (far = {} * world + {})", packDistant != null ? "shader pack's" : "plain",
+				distantPair.x, distantPair.y);
 		}
 	}
 

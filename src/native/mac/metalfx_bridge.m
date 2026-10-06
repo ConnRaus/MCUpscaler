@@ -329,8 +329,12 @@ typedef struct {
     uint32_t pad3[3];
     float objMin[4], objMax[4]; // third person: the player's box relative to the camera (min > max = none)
     float objDelta[4];          // the player's movement since the previous frame
+    uint32_t handMotion;        // bits: the right (1) / left (2) arm's matrices below are valid (HandMotion.java)
+    uint32_t pad4[3];
+    float handClipToLocal[2][16];     // per arm: inverse(hand projection * model-view * arm pose), unjittered
+    float prevHandLocalToClip[2][16]; // per arm: the previous frame's hand projection * model-view * arm pose
 } MfxTemporalParams;
-_Static_assert(sizeof(MfxTemporalParams) == 320, "TemporalParams layout");
+_Static_assert(sizeof(MfxTemporalParams) == 592, "TemporalParams layout");
 
 // The shader pack's vignette, taken out of the pack (VitrailCompat) and drawn after upscaling and after frame generation
 // captured the world image, so frame generation doesn't move it with the world. Same as the Windows post pass (POST in
@@ -349,6 +353,23 @@ static float3 packVignette(float3 c, uint2 gid, float2 size, uint kind, float a,
     else if (kind == 4) { lin = false; v = 1.0 - dot(d, d) * (1.0 - dot(c, float3(0.2125, 0.7154, 0.0721))); }\n\
     v = saturate(v);\n\
     return saturate(lin ? pow(pow(max(c, 0.0), 2.2) * v, 1.0 / 2.2) : c * v);\n\
+}\n" HAND_MSL
+
+// The first-person hands' motion (pixels, current -> previous; see HandMotion.java). The hands are drawn with their own
+// projection and pose, so the camera's motion doesn't fit them: the hand point at ndc with device depth hd is taken back
+// through this frame's matrices of the arm drawn on that half of the screen and projected with the previous frame's.
+// arms = 0 (no matrices): no motion.
+#define HAND_MSL "\
+static float2 handMotion(uint arms, float4x4 toLocalR, float4x4 toLocalL, float4x4 prevR, float4x4 prevL, float2 ndc, float hd,\n\
+                         bool zZeroToOne, bool flipY, float2 uv, float2 size) {\n\
+    if (arms == 0) return float2(0.0);\n\
+    bool right = ndc.x >= 0.0 ? (arms & 1u) != 0 : (arms & 2u) == 0;\n\
+    float4 local = (right ? toLocalR : toLocalL) * float4(ndc, zZeroToOne ? hd : hd * 2.0 - 1.0, 1.0);\n\
+    float4 prevClip = (right ? prevR : prevL) * local;\n\
+    if (prevClip.w <= 0.0) return float2(0.0);\n\
+    float2 prevNdc = prevClip.xy / prevClip.w;\n\
+    float2 prevUv = float2(prevNdc.x * 0.5 + 0.5, flipY ? (1.0 - prevNdc.y) * 0.5 : prevNdc.y * 0.5 + 0.5);\n\
+    return (prevUv - uv) * size;\n\
 }\n"
 
 static NSString *const kMotionShader = @"\
@@ -362,6 +383,7 @@ struct Params {\n\
     uint reset; uint zZeroToOne; uint flipY; uint debugView; float2 motionScale; uint skipScaler; float sharpness; uint kind; uint pad2;\n\
     float4 camFrac; int4 camInt; uint2 outSize; uint2 pad3;\n\
     float4 projTerms; float4 timePad; float4 objMin; float4 objMax; float4 objDelta;\n\
+    uint4 hand; float4x4 handToLocal[2]; float4x4 prevHand[2];\n\
 };\n\
 // Position relative to the previous camera; points in the player's box also moved with the player.\n\
 static float3 prevRelative(float3 rel, float4 camDelta, float4 objMin, float4 objMax, float4 objDelta) {\n\
@@ -376,14 +398,18 @@ kernel void camera_motion(depth2d<float, access::read> sceneDepth [[texture(0)]]
                           uint2 gid [[thread_position_in_grid]]) {\n\
     uint w = motion.get_width(), h = motion.get_height();\n\
     if (gid.x >= w || gid.y >= h) return;\n\
-    // The first-person hand moves with the camera, so no motion. Hand depth is either the hand alone (vanilla: 0 elsewhere)\n\
-    // or the scene with the hand (shader packs draw it into the world's depth: equal to the scene depth elsewhere).\n\
+    // Hand depth is either the hand alone (vanilla: 0 elsewhere) or the scene with the hand (shader packs draw it into the\n\
+    // world's depth: equal to the scene depth elsewhere).\n\
     float d = sceneDepth.read(gid);\n\
     float hd = handDepth.read(gid);\n\
-    if (hd > 0.0 && hd != d) { motion.write(half4(0.0h), gid); return; }\n\
     float2 size = float2(w, h);\n\
     float2 uv = (float2(gid) + 0.5) / size;\n\
     float2 ndc = float2(uv.x * 2.0 - 1.0, p.flipY ? 1.0 - uv.y * 2.0 : uv.y * 2.0 - 1.0);\n\
+    if (hd > 0.0 && hd != d) {\n\
+        float2 mv = handMotion(p.hand.x, p.handToLocal[0], p.handToLocal[1], p.prevHand[0], p.prevHand[1], ndc, hd, p.zZeroToOne != 0, p.flipY != 0, uv, size);\n\
+        motion.write(half4(half2(mv), 0.0h, 0.0h), gid);\n\
+        return;\n\
+    }\n\
     float z = p.zZeroToOne ? d : d * 2.0 - 1.0;\n\
     float4 rel = p.curInvViewProj * float4(ndc, z, 1.0);\n\
     rel /= rel.w;\n\
@@ -1272,7 +1298,7 @@ int mfx_upscale_temporal(uintptr_t inTex, uintptr_t sceneDepthTex, uintptr_t han
 
 #include "fsr3_fg_shaders.h"
 
-// Must match fgParams in MetalBackend.java (272 bytes).
+// Must match fgParams in MetalBackend.java (544 bytes).
 typedef struct {
     float curInvViewProj[16];   // inverse(unjittered projection * view rotation), current frame
     float prevViewProj[16];     // unjittered projection * view rotation, previous frame
@@ -1289,8 +1315,12 @@ typedef struct {
     uint32_t vignette;          // the shader pack's vignette drawn over the final image (PackVignette.*, 0 = none)
     float vignetteA, vignetteB; // its settings
     uint32_t pad5;
+    uint32_t handMotion;        // the hands' matrices, as in MfxTemporalParams
+    uint32_t pad6[3];
+    float handClipToLocal[2][16];
+    float prevHandLocalToClip[2][16];
 } MfxFrameGenParams;
-_Static_assert(sizeof(MfxFrameGenParams) == 272, "FrameGenParams layout");
+_Static_assert(sizeof(MfxFrameGenParams) == 544, "FrameGenParams layout");
 
 // cbFI (FrameInterpolationConstants).
 typedef struct {
@@ -1364,6 +1394,8 @@ struct FgParams {\n\
     float nearPlane; float farPlane; float tanHalfFovX; float tanHalfFovY;\n\
     float motionScaleX; float motionScaleY; float frameTimeMs; uint backend;\n\
     float2 cross; uint menuOpen; uint pad4; float4 objMin; float4 objMax; float4 objDelta;\n\
+    uint vignette; float vignetteA; float vignetteB; uint pad5;\n\
+    uint4 hand; float4x4 handToLocal[2]; float4x4 prevHand[2];\n\
 };\n\
 static float3 prevRelative(float3 rel, float4 camDelta, float4 objMin, float4 objMax, float4 objDelta) {\n\
     float3 prev = rel + camDelta.xyz;\n\
@@ -1389,9 +1421,14 @@ kernel void fg_mfx_prepare(texture2d<float, access::sample> world [[texture(0)]]
     uint2 hs = uint2(handDepth.get_width(), handDepth.get_height());\n\
     float hand = handDepth.read(min(uint2(uv * float2(hs)), hs - 1));\n\
     float d = sceneDepth.read(min(uint2(uv * float2(ds)), ds - 1));\n\
-    if (hand > 0.0 && hand != d) { depthOut.write(float4(hand), gid); motion.write(half4(0.0h), gid); return; }\n\
-    depthOut.write(float4(d), gid);\n\
     float2 ndc = float2(uv.x * 2.0 - 1.0, p.flipY ? 1.0 - uv.y * 2.0 : uv.y * 2.0 - 1.0);\n\
+    if (hand > 0.0 && hand != d) {\n\
+        depthOut.write(float4(hand), gid);\n\
+        float2 mv = handMotion(p.hand.x, p.handToLocal[0], p.handToLocal[1], p.prevHand[0], p.prevHand[1], ndc, hand, p.zZeroToOne != 0, p.flipY != 0, uv, size);\n\
+        motion.write(half4(half2(mv), 0.0h, 0.0h), gid);\n\
+        return;\n\
+    }\n\
+    depthOut.write(float4(d), gid);\n\
     float z = p.zZeroToOne ? d : d * 2.0 - 1.0;\n\
     float4 rel = p.curInvViewProj * float4(ndc, z, 1.0);\n\
     rel /= rel.w;\n\
@@ -1450,11 +1487,16 @@ kernel void fg_inputs(depth2d<float, access::read> sceneDepth [[texture(0)]],\n\
     float d = sceneDepth.read(min(uint2((float2(gid) + 0.5) * float2(ds) / float2(w, h)), ds - 1));\n\
     uint2 hs = uint2(handDepth.get_width(), handDepth.get_height());\n\
     float hand = handDepth.read(min(uint2((float2(gid) + 0.5) * float2(hs) / float2(w, h)), hs - 1));\n\
-    if (hand > 0.0 && hand != d) { depthOut.write(float4(max(d, hand)), gid); motion.write(half4(0.0h), gid); return; }\n\
-    depthOut.write(float4(d), gid);\n\
     float2 size = float2(w, h);\n\
     float2 uv = (float2(gid) + 0.5) / size;\n\
     float2 ndc = float2(uv.x * 2.0 - 1.0, p.flipY ? 1.0 - uv.y * 2.0 : uv.y * 2.0 - 1.0);\n\
+    if (hand > 0.0 && hand != d) {\n\
+        depthOut.write(float4(max(d, hand)), gid);\n\
+        float2 mv = handMotion(p.hand.x, p.handToLocal[0], p.handToLocal[1], p.prevHand[0], p.prevHand[1], ndc, hand, p.zZeroToOne != 0, p.flipY != 0, uv, size);\n\
+        motion.write(half4(half2(mv), 0.0h, 0.0h), gid);\n\
+        return;\n\
+    }\n\
+    depthOut.write(float4(d), gid);\n\
     float z = p.zZeroToOne ? d : d * 2.0 - 1.0;\n\
     float4 rel = p.curInvViewProj * float4(ndc, z, 1.0);\n\
     rel /= rel.w;\n\
@@ -1466,17 +1508,20 @@ kernel void fg_inputs(depth2d<float, access::read> sceneDepth [[texture(0)]],\n\
     motion.write(half4(half2(mv), 0.0h, 0.0h), gid);\n\
 }\n\
 // Hand mask at 1/4 of the hand depth's resolution: where the first-person hand is now or was in the previous frame (the\n\
-// interpolators blend the previous world image, hand included, so its old place would show a ghost hand).\n\
+// interpolators blend the previous world image, hand included, so its old place would show a ghost hand). Not needed\n\
+// when the hand has its own motion vectors (handMoves): then only the F3 crosshair box.\n\
 kernel void fg_hand_mask(depth2d<float, access::read> handDepth [[texture(0)]],\n\
                          depth2d<float, access::read> prevHandDepth [[texture(1)]],\n\
                          texture2d<float, access::write> mask [[texture(2)]],\n\
                          depth2d<float, access::read> sceneDepth [[texture(3)]],\n\
                          depth2d<float, access::read> prevSceneDepth [[texture(4)]],\n\
                          constant float4 &cross [[buffer(0)]],\n\
+                         constant uint &handMoves [[buffer(1)]],\n\
                          uint2 gid [[thread_position_in_grid]]) {\n\
     if (gid.x >= mask.get_width() || gid.y >= mask.get_height()) return;\n\
     float2 fromCentre = abs((float2(gid) + 0.5) / float2(mask.get_width(), mask.get_height()) - 0.5);\n\
     if ((cross.x > 0.0 && all(fromCentre < cross.xy)) || (cross.z > 0.0 && all(fromCentre < cross.zw))) { mask.write(float4(1.0), gid); return; }\n\
+    if (handMoves != 0) { mask.write(float4(0.0), gid); return; }\n\
     uint2 lim = uint2(handDepth.get_width() - 1, handDepth.get_height() - 1);\n\
     uint2 slim = uint2(sceneDepth.get_width() - 1, sceneDepth.get_height() - 1);\n\
     float2 toScene = float2(sceneDepth.get_width(), sceneDepth.get_height()) / float2(handDepth.get_width(), handDepth.get_height());\n\
@@ -2237,7 +2282,8 @@ static void blitCopy(id<MTLBlitCommandEncoder> blit, id<MTLTexture> src, id<MTLT
                 toTexture:dst destinationSlice:0 destinationLevel:0 destinationOrigin:MTLOriginMake(0, 0, 0)];
 }
 
-// Pastes the first-person hand (now and in the previous frame) from the current real frame into the generated one.
+// Pastes the first-person hand (now and in the previous frame) from the current real frame into the generated one, unless
+// it has its own motion vectors.
 static void encodeHandFix(id<MTLComputeCommandEncoder> ce, int stage, id<MTLTexture> real, id<MTLTexture> out, const MfxFrameGenParams *p) {
     // The F3 axis crosshair is drawn into the world image without depth and turns with the camera: like the hand, it
     // comes from the real frame (this frame's box or the previous one's).
@@ -2246,7 +2292,9 @@ static void encodeHandFix(id<MTLComputeCommandEncoder> ce, int stage, id<MTLText
     prevCross[0] = p->crossHalfX;
     prevCross[1] = p->crossHalfY;
     [ce setComputePipelineState:gFgHandMaskPipeline];
+    uint32_t handMoves = p->handMotion != 0;
     [ce setBytes:cross length:sizeof cross atIndex:0];
+    [ce setBytes:&handMoves length:sizeof handMoves atIndex:1];
     [ce setTexture:gFgStageHand[stage] atIndex:0];
     [ce setTexture:gFgStageHand[(stage + 2) % 3] atIndex:1];
     [ce setTexture:gFgHandMask atIndex:2];

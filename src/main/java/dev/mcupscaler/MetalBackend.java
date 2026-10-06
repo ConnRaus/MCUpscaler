@@ -33,13 +33,13 @@ final class MetalBackend {
 	private static final double TELEPORT_SQR = 64.0;
 
 	/** Offsets in MfxTemporalParams. */
-	static final int TEMPORAL_PARAMS_SIZE = 320;
+	static final int TEMPORAL_PARAMS_SIZE = 592;
 	static final long T_INV_VIEW_PROJ = 0, T_PREV_VIEW_PROJ = 64, T_CAM_DELTA = 128, T_JITTER = 144, T_RESET = 152, T_Z_ZERO_TO_ONE = 156;
 	static final long T_MOTION_SCALE = 168, T_SHARPNESS = 180, T_KIND = 184, T_M22 = 240, T_M32 = 244, T_INV_M00 = 248, T_INV_M11 = 252;
-	static final long T_FRAME_TIME = 256, T_PLAYER_BOX = 272;
+	static final long T_FRAME_TIME = 256, T_PLAYER_BOX = 272, T_HAND_MOTION = 320;
 	/** MfxTemporalParams kind: MetalFX temporal or FSR 3.1. */
 	static final int KIND_METALFX = 0, KIND_FSR = 4;
-	private static final int FG_PARAMS_SIZE = 272;
+	private static final int FG_PARAMS_SIZE = 544;
 
 	static final MemorySegment temporalParams = Arena.global().allocate(TEMPORAL_PARAMS_SIZE, 16);
 	private static final MemorySegment fgParams = Arena.global().allocate(FG_PARAMS_SIZE, 16);
@@ -398,6 +398,7 @@ final class MetalBackend {
 		fgParams.set(ValueLayout.JAVA_FLOAT, 260, vignetteScratch[1]);
 		fgParams.set(ValueLayout.JAVA_FLOAT, 264, vignetteScratch[2]);
 		fgParams.set(ValueLayout.JAVA_INT, 268, 0);
+		WorldUpscaler.handMotion.write(fgParams, 272, 288, reset);
 		fgPrevViewProj.set(viewProj);
 		fgPrevCameraPos = cameraPos;
 		fgPrevLevel = level;

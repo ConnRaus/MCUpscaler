@@ -28,6 +28,8 @@ static NVSDK_NGX_Handle *gFg;
 static uint32_t gFgW, gFgH, gFgRenderW, gFgRenderH;
 static VkFormat gFgFormat;
 static OwnedImage gFgReal[kFgSlots], gFgInterp[kFgSlots];
+// Copies of the world image (gLastWorld) the generators interpolate; the HUD is composited onto the result afterwards.
+static OwnedImage gFgWorld[kFgSlots];
 // The frames as presented: flipped to the screen's orientation and in the swapchain's format, so the present thread only
 // copies them. That copy can then run on a queue without graphics (Minecraft's unused compute queue), which doesn't wait
 // behind the next frame's rendering the way the graphics queue does.
@@ -462,7 +464,8 @@ EXPORT int dlss_fg_record(uint64_t commandBuffer, const Tex *final, int backend,
         fgDrain(); // the present thread may still be showing the old images
         for (uint32_t i = 0; i < kFgSlots; i++) {
             if (!ensureImage(gFgReal[i], format, w, h, usage, "frame generation real frame")
-                || !ensureImage(gFgInterp[i], format, w, h, usage, "frame generation generated frame")) {
+                || !ensureImage(gFgInterp[i], format, w, h, usage, "frame generation generated frame")
+                || !ensureImage(gFgWorld[i], format, w, h, usage, "frame generation world image")) {
                 return 0;
             }
         }
@@ -486,6 +489,7 @@ EXPORT int dlss_fg_record(uint64_t commandBuffer, const Tex *final, int backend,
     for (uint32_t i = 0; i < kFgSlots; i++) {
         transitionFresh(cb, gFgReal[i]);
         transitionFresh(cb, gFgInterp[i]);
+        transitionFresh(cb, gFgWorld[i]);
         transitionFresh(cb, gFgOutReal[i]);
         transitionFresh(cb, gFgOutInterp[i]);
     }
@@ -495,6 +499,16 @@ EXPORT int dlss_fg_record(uint64_t commandBuffer, const Tex *final, int backend,
     copy.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
     copy.extent = {w, h, 1};
     p_vkCmdCopyImage(cb, (VkImage)final->image, VK_IMAGE_LAYOUT_GENERAL, gFgReal[slot].image, VK_IMAGE_LAYOUT_GENERAL, 1, &copy);
+    // The generators get the world without the HUD, and a composite pass adds the HUD afterwards (as on macOS): given the
+    // final frame and a HUD-less one, DLSS-G and FSR take every pixel that differs between them for HUD and paste in the
+    // real frame there, and Minecraft's vignette (drawn with the HUD) made that an oval of real frame around the
+    // interpolated centre, which slid against the screen edges while turning.
+    OwnedImage *world = gLastWorld;
+    gLastWorld = nullptr;
+    VignetteParams vignette = gLastVignette;
+    bool composite = world && world->image && world->width == w && world->height == h && format == VK_FORMAT_R8G8B8A8_UNORM;
+    if (composite) copyImage(cb, world->image, world->format, gFgWorld[slot].image, gFgWorld[slot].format, w, h);
+    const OwnedImage &source = composite ? gFgWorld[slot] : gFgReal[slot];
     globalBarrier(cb);
 
     bool interp = false;
@@ -504,30 +518,25 @@ EXPORT int dlss_fg_record(uint64_t commandBuffer, const Tex *final, int backend,
     double now = nowSeconds();
     float frameTimeMs = gFgLastRecord > 0.0 ? (float)((now - gFgLastRecord) * 1000.0) : 16.7f;
     gFgLastRecord = now;
-    OwnedImage *hud = gLastOutput;
-    bool hudless = hud && hud->image && hud->width == w && hud->height == h;
     if (backend == FG_FSR && inputsValid && !notGame) {
         bool reset = gFgCamera.reset != 0 || !gFgHistory;
-        bool ok = fsrFrameGen(cb, id, reset, frameTimeMs, gFgReal[slot], hudless ? hud : nullptr, gFgInterp[slot], gFgCamera);
+        bool ok = fsrFrameGen(cb, id, reset, frameTimeMs, source, nullptr, gFgInterp[slot], gFgCamera);
         interp = ok && gFgHistory; // the first frame after a reset has nothing to interpolate from
         gFgHistory = ok;
         globalBarrier(cb);
     } else if (backend == FG_DLSS && inputsValid && !notGame && ensureFgFeature(cb, w, h, format)) {
-        NVSDK_NGX_Resource_VK backbuffer = resourceOf((uint64_t)gFgReal[slot].image, (uint64_t)gFgReal[slot].view, format, w, h, false);
+        NVSDK_NGX_Resource_VK backbuffer = resourceOf((uint64_t)source.image, (uint64_t)source.view, format, w, h, false);
         NVSDK_NGX_Resource_VK depth = resourceOf((uint64_t)gDlssDepth.image, (uint64_t)gDlssDepth.view, gDlssDepth.format,
             gDlssDepth.width, gDlssDepth.height, false);
         NVSDK_NGX_Resource_VK mvecs = resourceOf((uint64_t)gMotion.image, (uint64_t)gMotion.view, gMotion.format, gMotion.width,
             gMotion.height, false);
         NVSDK_NGX_Resource_VK output = resourceOf((uint64_t)gFgInterp[slot].image, (uint64_t)gFgInterp[slot].view, format, w, h, true);
-        hudless = hudless && hud->format == format;
-        NVSDK_NGX_Resource_VK hudlessRes{};
-        if (hudless) hudlessRes = resourceOf((uint64_t)hud->image, (uint64_t)hud->view, hud->format, w, h, false);
 
         NVSDK_NGX_VK_DLSSG_Eval_Params eval{};
         eval.pBackbuffer = &backbuffer;
         eval.pDepth = &depth;
         eval.pMVecs = &mvecs;
-        eval.pHudless = hudless ? &hudlessRes : nullptr;
+        eval.pHudless = nullptr;
         eval.pOutputInterpFrame = &output;
         NVSDK_NGX_DLSSG_Opt_Eval_Params opt{};
         opt.multiFrameCount = 1;
@@ -561,7 +570,6 @@ EXPORT int dlss_fg_record(uint64_t commandBuffer, const Tex *final, int backend,
         opt.menuDetectionEnabled = false;
         opt.mvecsSubrectSize = {gMotion.width, gMotion.height};
         opt.depthSubrectSize = {gDlssDepth.width, gDlssDepth.height};
-        if (hudless) opt.hudLessSubrectSize = {w, h};
         opt.backbufferSubrectSize = {w, h};
         opt.outputInterpSubrectSize = {w, h};
         NVSDK_NGX_Parameter_SetULL(gFgParams, NVSDK_NGX_DLSSG_Parameter_BackbufferFrameID, id);
@@ -575,6 +583,14 @@ EXPORT int dlss_fg_record(uint64_t commandBuffer, const Tex *final, int backend,
         globalBarrier(cb);
     } else {
         gFgHistory = false;
+    }
+    if (interp && composite) {
+        // The generated world + this frame's HUD (final - world), with the shader pack's vignette on both; see
+        // FG_COMPOSITE in Shaders.java.
+        Resource res[3] = {{gFgInterp[slot].view}, {gFgWorld[slot].view}, {gFgReal[slot].view}};
+        struct { uint32_t kind; float a, b; } push = {vignette.kind, vignette.a, vignette.b};
+        dispatch(cb, PASS_FG_COMPOSITE, res, &push, sizeof(push), w, h);
+        globalBarrier(cb);
     }
     // Flip (Minecraft's images are upside down relative to the screen) into the swapchain's format for the present thread.
     auto flip = [&](const OwnedImage &src, const OwnedImage &dst) {
@@ -616,6 +632,7 @@ void fgShutdown() {
     for (uint32_t i = 0; i < kFgSlots; i++) {
         destroyImage(gFgReal[i]);
         destroyImage(gFgInterp[i]);
+        destroyImage(gFgWorld[i]);
         destroyImage(gFgOutReal[i]);
         destroyImage(gFgOutInterp[i]);
     }

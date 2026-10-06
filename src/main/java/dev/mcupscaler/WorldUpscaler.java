@@ -17,6 +17,7 @@ import net.minecraft.client.renderer.Projection;
 import net.minecraft.client.renderer.state.level.CameraRenderState;
 import net.minecraft.world.phys.Vec3;
 import org.joml.Matrix4f;
+import org.joml.Matrix4fc;
 import org.jspecify.annotations.Nullable;
 import org.lwjgl.vulkan.VK;
 import org.lwjgl.vulkan.VkDevice;
@@ -84,6 +85,9 @@ public final class WorldUpscaler {
 	private static final Jitter jitter = new Jitter();
 	private static final DepthCapture depth = new DepthCapture();
 	private static final MotionBoxes motionBoxes = new MotionBoxes();
+	static final HandMotion handMotion = new HandMotion();
+	/** Vitrail is drawing the first-person hand (a shader pack is on): the projection it uploads is the hand's. */
+	private static boolean packHandDrawing;
 	private static final MemorySegment frame = Arena.global().allocate(DlssNative.FRAME_SIZE, 16);
 	/** The shader pack's vignette, drawn after upscaling (VitrailCompat#vignette). */
 	private static final float[] vignette = new float[3];
@@ -547,6 +551,7 @@ public final class WorldUpscaler {
 			captureFrame = Platform.MAC ? metalFrameGen : passesReady && FrameGen.isRunning();
 			realMainTarget = captureFrame ? mainTarget : null;
 			depth.beginFrame(realMainTarget);
+			handMotion.beginFrame();
 			return;
 		}
 		realMainTarget = mainTarget;
@@ -557,6 +562,7 @@ public final class WorldUpscaler {
 			jitterCamera(world.width, world.height, (double)mainTarget.width / world.width);
 		}
 		depth.beginFrame(captureFrame ? world : null);
+		handMotion.beginFrame();
 		// After the jitter: the globals also carry the texture LOD correction (see lodScaleCode).
 		updateScreenSize(world.width, world.height);
 	}
@@ -679,7 +685,31 @@ public final class WorldUpscaler {
 	/** The first-person hand's projection, jittered the same way as the world (so DLSS sees consistent jitter). */
 	public static Matrix4f handProjection(Projection projection) {
 		Matrix4f matrix = projection.getMatrix(new Matrix4f());
+		handMotion.projection(matrix);
 		return temporalFrame && !packJitterFrame ? jitter.apply(matrix, 1.0F) : matrix;
+	}
+
+	/** A projection matrix is being uploaded; while Vitrail draws the hand, it is the hand's. */
+	public static void projectionUploaded(Matrix4f projection) {
+		if (packHandDrawing) {
+			handMotion.projection(projection);
+		}
+	}
+
+	/** First-person arms are being submitted with {@code pose} under {@code modelView} (see HandMotion). */
+	public static void handsSubmitted(Matrix4fc pose, Matrix4fc modelView) {
+		armSubmitted(HandMotion.BOTH, pose, modelView);
+	}
+
+	/** One first-person arm ({@code right} or left) is being drawn with its final {@code pose}. */
+	public static void armSubmitted(boolean right, Matrix4fc pose, Matrix4fc modelView) {
+		armSubmitted(right ? HandMotion.RIGHT : HandMotion.LEFT, pose, modelView);
+	}
+
+	private static void armSubmitted(int arms, Matrix4fc pose, Matrix4fc modelView) {
+		if (captureFrame) {
+			handMotion.submitted(arms, pose, modelView);
+		}
 	}
 
 	private static CameraRenderState cameraState() {
@@ -696,21 +726,25 @@ public final class WorldUpscaler {
 	/** Called by Vitrail right before it draws the first-person hand into the world (its replacement of the hand pass). */
 	public static void beforePackHand() {
 		depth.beforePackHand();
+		packHandDrawing = true;
 	}
 
 	/** Called by Vitrail right after it drew the first-person hand into the world. */
 	public static void afterPackHand() {
 		depth.afterPackHand();
+		packHandDrawing = false;
 	}
 
 	/** Called by Vitrail right before it draws the translucent half of the hand. */
 	public static void beforePackTranslucentHand() {
 		depth.beforePackTranslucentHand();
+		packHandDrawing = true;
 	}
 
 	/** Called by Vitrail right after it drew the translucent half of the hand. */
 	public static void afterPackTranslucentHand() {
 		depth.afterPackTranslucentHand();
+		packHandDrawing = false;
 	}
 
 	// ------------------------------------------------------------------ upscaling
@@ -835,6 +869,7 @@ public final class WorldUpscaler {
 		params.set(ValueLayout.JAVA_FLOAT, MetalBackend.T_FRAME_TIME, lastTemporalNanos == 0L ? 16.7F : (now - lastTemporalNanos) / 1.0e6F);
 		lastTemporalNanos = now;
 		motionBoxes.writePlayerBox(params, MetalBackend.T_PLAYER_BOX, cameraPos, reset);
+		handMotion.write(params, MetalBackend.T_HAND_MOTION, MetalBackend.T_HAND_MOTION + 16, reset);
 
 		int result = MetalBackend.upscaleTemporal(src, sceneDepth, handDepth, dst);
 		if (result <= 0) {
@@ -892,6 +927,7 @@ public final class WorldUpscaler {
 		frame.set(ValueLayout.JAVA_FLOAT, DlssNative.FRAME_SHARPNESS, UpscalerConfig.sharpness);
 		frame.set(ValueLayout.JAVA_FLOAT, DlssNative.FRAME_FOV, (float)(2.0 * Math.atan(1.0 / Math.abs(levelProjection.m11()))));
 		frame.set(ValueLayout.JAVA_FLOAT, DlssNative.FRAME_NEAR, 0.05F);
+		handMotion.write(frame, DlssNative.FRAME_HAND_MOTION, DlssNative.FRAME_HAND_CLIP_TO_LOCAL, reset);
 	}
 
 	private static void writeMatrix(long offset, Matrix4f matrix) {

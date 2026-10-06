@@ -36,7 +36,7 @@ public final class DlssNative {
 	/** Size of a texture description (struct Tex in the bridge). */
 	public static final long TEX_SIZE = 32;
 	/** Offsets in struct Frame. */
-	public static final long FRAME_SIZE = 392;
+	public static final long FRAME_SIZE = 648;
 	public static final long FRAME_COLOR = 0, FRAME_DEPTH = 32, FRAME_HAND = 64, FRAME_OUTPUT = 96;
 	public static final long FRAME_INV_VIEW_PROJ = 128, FRAME_PREV_VIEW_PROJ = 192, FRAME_CAM_DELTA = 256;
 	public static final long FRAME_OBJ_MIN = 272, FRAME_OBJ_MAX = 288, FRAME_OBJ_DELTA = 304;
@@ -44,6 +44,7 @@ public final class DlssNative {
 	public static final long FRAME_Z_ZERO_TO_ONE = 340, FRAME_FRAME_TIME = 344, FRAME_UPSCALER = 348;
 	public static final long FRAME_BOXES = 352, FRAME_BOX_COUNT = 360, FRAME_VIGNETTE = 364;
 	public static final long FRAME_SHARPNESS = 376, FRAME_FOV = 380, FRAME_NEAR = 384;
+	public static final long FRAME_HAND_MOTION = 388, FRAME_HAND_CLIP_TO_LOCAL = 392;
 	/** Moving entities the motion vectors know about: {min, max, delta} float4s each. */
 	public static final int MAX_BOXES = 64, BOX_BYTES = 48;
 	/** Offsets in struct FgCamera (frame generation). */
@@ -107,7 +108,7 @@ public final class DlssNative {
 			SymbolLookup lookup = SymbolLookup.libraryLookup(nativeDir.resolve("dlss_bridge.dll"), ARENA);
 			ValueLayout J = ValueLayout.JAVA_LONG, I = ValueLayout.JAVA_INT, F = ValueLayout.JAVA_FLOAT;
 			init = linker.downcallHandle(lookup.findOrThrow("dlss_init"), FunctionDescriptor.of(I, J, J, J, J, J, J, J, I));
-			loadShaders = linker.downcallHandle(lookup.findOrThrow("dlss_load_shaders"), FunctionDescriptor.of(I, J, I, J, I, J, I, J, I));
+			loadShaders = linker.downcallHandle(lookup.findOrThrow("dlss_load_shaders"), FunctionDescriptor.of(I, J, I, J, I, J, I, J, I, J, I));
 			upscale = linker.downcallHandle(lookup.findOrThrow("dlss_upscale"), FunctionDescriptor.of(I, J, J));
 			mergePackDepth = linker.downcallHandle(lookup.findOrThrow("dlss_merge_pack_depth"), FunctionDescriptor.of(I, J, J, J, J, J, J));
 			mergeDistantDepth = linker.downcallHandle(lookup.findOrThrow("dlss_merge_distant_depth"), FunctionDescriptor.of(I, J, J, J, F, F));
@@ -290,7 +291,7 @@ public final class DlssNative {
 				code[i].copyFrom(MemorySegment.ofArray(spirv[i]));
 			}
 			return (int)loadShaders.invokeExact(code[0].address(), spirv[0].length, code[1].address(), spirv[1].length, code[2].address(),
-				spirv[2].length, code[3].address(), spirv[3].length) == 1;
+				spirv[2].length, code[3].address(), spirv[3].length, code[4].address(), spirv[4].length) == 1;
 		} catch (Throwable t) {
 			throw new RuntimeException(t);
 		}

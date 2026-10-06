@@ -396,7 +396,7 @@ EXPORT int dlss_frame_gen_max_multi_frame(void) {
 
 // SPIR-V for the compute passes (compiled from GLSL by Java with shaderc), in PassId order.
 EXPORT int dlss_load_shaders(const uint32_t *motion, int motionBytes, const uint32_t *packMerge, int packMergeBytes, const uint32_t *distantMerge, int distantMergeBytes,
-                             const uint32_t *post, int postBytes) {
+                             const uint32_t *post, int postBytes, const uint32_t *fgComposite, int fgCompositeBytes) {
     if (gPassesReady) return 1;
     VkSamplerCreateInfo sci{VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO};
     sci.magFilter = sci.minFilter = VK_FILTER_NEAREST;
@@ -410,7 +410,8 @@ EXPORT int dlss_load_shaders(const uint32_t *motion, int motionBytes, const uint
     bool ok = createPass(gPasses[PASS_MOTION], motion, (size_t)motionBytes, {SAMPLED, SAMPLED, STORAGE_IMAGE, STORAGE_IMAGE, STORAGE_BUFFER, STORAGE_IMAGE}, "motion vectors")
         && createPass(gPasses[PASS_PACK_MERGE], packMerge, (size_t)packMergeBytes, {SAMPLED, SAMPLED, SAMPLED, SAMPLED, SAMPLED, STORAGE_BUFFER}, "pack depth merge")
         && createPass(gPasses[PASS_DISTANT_MERGE], distantMerge, (size_t)distantMergeBytes, {SAMPLED, SAMPLED, STORAGE_BUFFER}, "distant depth merge")
-        && createPass(gPasses[PASS_POST], post, (size_t)postBytes, {SAMPLED, STORAGE_IMAGE}, "vignette");
+        && createPass(gPasses[PASS_POST], post, (size_t)postBytes, {SAMPLED, STORAGE_IMAGE}, "vignette")
+        && createPass(gPasses[PASS_FG_COMPOSITE], fgComposite, (size_t)fgCompositeBytes, {STORAGE_IMAGE, SAMPLED, SAMPLED}, "frame generation composite");
     gPassesReady = ok;
     return ok ? 1 : 0;
 }

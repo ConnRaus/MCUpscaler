@@ -6,8 +6,13 @@
   "client": [
     "GpuDeviceAccessor",
     "CommandEncoderAccessor",
+    "DistantHorizonsMetaRendererMixin",
+    "DistantHorizonsTaaMixin",
+    "DistantHorizonsTerrainMixin",
+    "FirstPersonHandsMixin",
     "GameRendererMixin",
     "MinecraftMixin",
+    "ProjectionMatrixBufferMixin",
     "GlobalSettingsUniformMixin",
     "ShaderManagerMixin",
     "SkyRendererMixin",

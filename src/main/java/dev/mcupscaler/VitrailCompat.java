@@ -1,6 +1,9 @@
 package dev.mcupscaler;
 
 import com.mojang.renderpearl.api.textures.GpuTexture;
+import java.lang.invoke.MethodHandle;
+import java.lang.invoke.MethodHandles;
+import java.lang.invoke.MethodType;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.nio.file.Path;
@@ -25,6 +28,8 @@ public final class VitrailCompat {
 	private static volatile boolean bakedAaOff;
 	private static volatile boolean bakedStill;
 	private static volatile boolean bakedVignetteOff;
+	/** Windows frame generation is switched on (read on the render thread by {@link #tick}, for the loader threads). */
+	private static volatile boolean frameGenWanted;
 	private static boolean reloadFailed;
 
 	private static final PackVignette vignette = new PackVignette();
@@ -76,7 +81,7 @@ public final class VitrailCompat {
 	 * would move it with the world: it comes out of the pack and is drawn after them (see {@link PackVignette}).
 	 */
 	private static boolean wantedVignetteOff() {
-		return wantedAaOff() || WorldUpscaler.isMetalFrameGenKnownReady();
+		return wantedAaOff() || WorldUpscaler.isMetalFrameGenKnownReady() || !Platform.MAC && frameGenWanted;
 	}
 
 	/**
@@ -92,6 +97,8 @@ public final class VitrailCompat {
 	/** Vitrail starts reading a pack: forget what the last one said. */
 	public static void packOpening() {
 		vignette.reset();
+		// One decision for the whole pack: the files are read on several threads while the settings may be changing.
+		bakedVignetteOff = wantedVignetteOff();
 		packJitterName = null;
 		bakedPackJitter = false;
 	}
@@ -115,7 +122,6 @@ public final class VitrailCompat {
 		float bias = wantedBias();
 		bakedAaOff = aaOff;
 		bakedStill = still;
-		bakedVignetteOff = wantedVignetteOff();
 		if (aaOff) {
 			lines = disableAa(lines, name);
 		}
@@ -160,7 +166,7 @@ public final class VitrailCompat {
 		if (packJitterName != null && line.contains("TAA") && PackSourcePatches.TAA_DEFINE_OFF.matcher(line).matches() && wantedAaOff()) {
 			return "#define TAA // Upscaler: the pack's jitter carries the upscaler's (its resolve pass is off)";
 		}
-		return line.contains("VIGNETTE") ? vignette.rewrite(line, wantedVignetteOff()) : line;
+		return line.contains("VIGNETTE") ? vignette.rewrite(line, bakedVignetteOff) : line;
 	}
 
 	/** The vignette to draw after upscaling and frame generation: {shape, a, b} into {@code out}, shape 0 = none. */
@@ -218,6 +224,35 @@ public final class VitrailCompat {
 	}
 
 	@Nullable
+	private static MethodHandle handDraws;
+	private static boolean handDrawsLooked;
+
+	/**
+	 * Vitrail draws the first-person hand itself this frame (a shader pack is on). Its hand passes run every frame and
+	 * return early otherwise: vanilla draws the hand then. Assumes it does if that can't be asked.
+	 */
+	public static boolean drawsHand() {
+		if (!handDrawsLooked) {
+			handDrawsLooked = true;
+			try {
+				handDraws = MethodHandles.publicLookup().findStatic(Class.forName("dev.vitrail.render.HandDraw"), "draws",
+					MethodType.methodType(boolean.class));
+			} catch (ReflectiveOperationException | RuntimeException e) {
+				UpscalerMod.LOGGER.warn("Could not ask Vitrail whether it draws the hand", e);
+			}
+		}
+		if (handDraws == null) {
+			return true;
+		}
+		try {
+			return (boolean)handDraws.invokeExact();
+		} catch (Throwable e) {
+			handDraws = null;
+			return true;
+		}
+	}
+
+	@Nullable
 	private static Field findField(Class<?> type, String name) {
 		for (Class<?> c = type; c != null; c = c.getSuperclass()) {
 			try {
@@ -234,7 +269,11 @@ public final class VitrailCompat {
 
 	/** Reloads the shader pack if what was baked into it no longer matches the settings. Call between frames. */
 	public static void tick() {
-		if (!PRESENT || reloadFailed || Float.isNaN(bakedBias)) {
+		if (!PRESENT) {
+			return;
+		}
+		frameGenWanted = !Platform.MAC && FrameGen.isWanted();
+		if (reloadFailed || Float.isNaN(bakedBias)) {
 			return;
 		}
 		float bias = wantedBias();

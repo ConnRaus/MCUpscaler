@@ -146,10 +146,11 @@ public abstract class GameRendererMixin {
 		)
 	)
 	private GpuBufferSlice mcupscaler$jitterHand(ProjectionMatrixBuffer buffer, Projection projection, Operation<GpuBufferSlice> original) {
+		Matrix4f matrix = WorldUpscaler.handProjection(projection);
 		if (!WorldUpscaler.isTemporalFrame()) {
 			return original.call(buffer, projection);
 		}
-		return buffer.getBuffer(WorldUpscaler.handProjection(projection));
+		return buffer.getBuffer(matrix);
 	}
 
 	@WrapOperation(
