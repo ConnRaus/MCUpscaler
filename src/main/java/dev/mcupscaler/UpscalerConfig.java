@@ -201,7 +201,7 @@ public final class UpscalerConfig {
 	/** Frame generation. Works with or without upscaling. */
 	public static FrameGeneration frameGeneration = FrameGeneration.OFF;
 	/** Sharpening after FSR and MetalFX (RCAS), 0 to 1; 0 is off. DLSS has none. */
-	public static float sharpness = 1.0F;
+	public static float sharpness = 0.5F;
 	/** The F3 section was switched on once (after that, the player decides in the F3 debug options). */
 	public static boolean debugEntryShown = false;
 	/** Sample textures at output-resolution detail while upscaling temporally (negative LOD bias). */
@@ -291,7 +291,7 @@ public final class UpscalerConfig {
 			customScale = clampScale(Float.parseFloat(props.getProperty("customScale", "0.75")));
 			preset = parseEnum(Preset.class, props.getProperty("preset"), Preset.AUTO);
 			frameGeneration = parseEnum(FrameGeneration.class, props.getProperty("frameGeneration"), FrameGeneration.OFF);
-			sharpness = clamp01(Float.parseFloat(props.getProperty("sharpness", "1")));
+			sharpness = clamp01(Float.parseFloat(props.getProperty("sharpness", "0.5")));
 			textureLodCorrection = Boolean.parseBoolean(props.getProperty("textureLodCorrection", "true"));
 			stillPackFoliage = Boolean.parseBoolean(props.getProperty("stillPackFoliage", "false"));
 			reflex = parseEnum(Reflex.class, props.getProperty("reflex"), Reflex.ON);

@@ -120,7 +120,7 @@ public final class SodiumOptions implements ConfigEntryPoint {
 			.addOption(builder.createIntegerOption(id("sharpness"))
 				.setName(Component.literal("Sharpness"))
 				.setTooltip(tip("Sharpens the upscaled image. Lower it if edges look harsh."))
-				.setDefaultValue(100)
+				.setDefaultValue(50)
 				.setRange(new Range(0, 100, 5))
 				.setValueFormatter(v -> Component.literal(v == 0 ? "Off" : v + "%"))
 				.setBinding(v -> UpscalerConfig.sharpness = v / 100.0F, () -> Math.round(UpscalerConfig.sharpness * 100.0F))

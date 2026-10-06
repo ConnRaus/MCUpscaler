@@ -100,7 +100,8 @@ public final class Shaders {
 	 * After upscaling: the shader pack's vignette, which was taken out of the pack (see VitrailCompat#rewrittenLine) so DLSS
 	 * doesn't move it with the world. kind = a PackVignette shape, a and b its settings. Packs darken before their
 	 * tonemapping; here the image is already display-encoded, so the darkening is applied to linear light, which comes
-	 * close (Complementary's is applied to the display values, as the pack does).
+	 * close (Complementary's is applied to the display values, as the pack does). BSL's tonemap rolls highlights off
+	 * hard (x / sqrt(x^2 + 1)): that is undone around the darkening, or the sun, sky and snow come out dull and yellowed.
 	 */
 	private static final String VIGNETTE = """
 		layout(push_constant, std430) uniform Params { int kind; float a; float b; } p;
@@ -127,7 +128,14 @@ public final class Shaders {
 				v = 1.0 - dot(d, d) * (1.0 - lum);
 			}
 			v = clamp(v, 0.0, 1.0);
-			vec3 rgb = linear ? pow(pow(max(c, vec3(0.0)), vec3(2.2)) * v, vec3(1.0 / 2.2)) : c * v;
+			vec3 l = pow(max(c, vec3(0.0)), vec3(2.2));
+			if (p.kind == 1) {
+				vec3 x = l * inversesqrt(max(1.0 - l * l, 1e-4)) * v;
+				l = x * inversesqrt(x * x + 1.0);
+			} else {
+				l *= v;
+			}
+			vec3 rgb = linear ? pow(l, vec3(1.0 / 2.2)) : c * v;
 			return clamp(rgb, 0.0, 1.0);
 		}
 		""";

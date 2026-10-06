@@ -352,7 +352,9 @@ static float3 packVignette(float3 c, uint2 gid, float2 size, uint kind, float a,
     else if (kind == 3) { v = pow(max(16.0 * uv.x * uv.y * (1.0 - uv.x) * (1.0 - uv.y), 0.0), 0.08 * a); }\n\
     else if (kind == 4) { lin = false; v = 1.0 - dot(d, d) * (1.0 - dot(c, float3(0.2125, 0.7154, 0.0721))); }\n\
     v = saturate(v);\n\
-    return saturate(lin ? pow(pow(max(c, 0.0), 2.2) * v, 1.0 / 2.2) : c * v);\n\
+    float3 l = pow(max(c, 0.0), 2.2);\n\
+    if (kind == 1) { float3 x = l * rsqrt(max(1.0 - l * l, 1e-4)) * v; l = x * rsqrt(x * x + 1.0); } else l *= v;\n\
+    return saturate(lin ? pow(l, 1.0 / 2.2) : c * v);\n\
 }\n" HAND_MSL
 
 // The first-person hands' motion (pixels, current -> previous; see HandMotion.java). The hands are drawn with their own
