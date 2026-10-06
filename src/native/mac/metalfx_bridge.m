@@ -1309,7 +1309,7 @@ typedef struct {
     float nearPlane, farPlane, tanHalfFovX, tanHalfFovY;
     float motionScaleX, motionScaleY, frameTimeMs;
     uint32_t backend;           // 0 = FSR 3, 1 = MetalFX frame interpolation
-    float crossHalfX, crossHalfY; // F3 axis crosshair: half size of a centred box (fraction of the image), 0 = none
+    float pad2[2];
     uint32_t menuOpen;          // a blurred menu covers the world: frame generation shows the real frame
     uint32_t pad4;
     float objMin[4], objMax[4]; // third person: the player's box relative to the camera (min > max = none)
@@ -1395,7 +1395,7 @@ struct FgParams {\n\
     uint zZeroToOne; uint flipY; uint reset; uint debugView;\n\
     float nearPlane; float farPlane; float tanHalfFovX; float tanHalfFovY;\n\
     float motionScaleX; float motionScaleY; float frameTimeMs; uint backend;\n\
-    float2 cross; uint menuOpen; uint pad4; float4 objMin; float4 objMax; float4 objDelta;\n\
+    float2 pad2; uint menuOpen; uint pad4; float4 objMin; float4 objMax; float4 objDelta;\n\
     uint vignette; float vignetteA; float vignetteB; uint pad5;\n\
     uint4 hand; float4x4 handToLocal[2]; float4x4 prevHand[2];\n\
 };\n\
@@ -1509,47 +1509,6 @@ kernel void fg_inputs(depth2d<float, access::read> sceneDepth [[texture(0)]],\n\
     if (prevClip.w <= 0.0) mv = float2(0.0);\n\
     motion.write(half4(half2(mv), 0.0h, 0.0h), gid);\n\
 }\n\
-// Hand mask at 1/4 of the hand depth's resolution: where the first-person hand is now or was in the previous frame (the\n\
-// interpolators blend the previous world image, hand included, so its old place would show a ghost hand). Not needed\n\
-// when the hand has its own motion vectors (handMoves): then only the F3 crosshair box.\n\
-kernel void fg_hand_mask(depth2d<float, access::read> handDepth [[texture(0)]],\n\
-                         depth2d<float, access::read> prevHandDepth [[texture(1)]],\n\
-                         texture2d<float, access::write> mask [[texture(2)]],\n\
-                         depth2d<float, access::read> sceneDepth [[texture(3)]],\n\
-                         depth2d<float, access::read> prevSceneDepth [[texture(4)]],\n\
-                         constant float4 &cross [[buffer(0)]],\n\
-                         constant uint &handMoves [[buffer(1)]],\n\
-                         uint2 gid [[thread_position_in_grid]]) {\n\
-    if (gid.x >= mask.get_width() || gid.y >= mask.get_height()) return;\n\
-    float2 fromCentre = abs((float2(gid) + 0.5) / float2(mask.get_width(), mask.get_height()) - 0.5);\n\
-    if ((cross.x > 0.0 && all(fromCentre < cross.xy)) || (cross.z > 0.0 && all(fromCentre < cross.zw))) { mask.write(float4(1.0), gid); return; }\n\
-    if (handMoves != 0) { mask.write(float4(0.0), gid); return; }\n\
-    uint2 lim = uint2(handDepth.get_width() - 1, handDepth.get_height() - 1);\n\
-    uint2 slim = uint2(sceneDepth.get_width() - 1, sceneDepth.get_height() - 1);\n\
-    float2 toScene = float2(sceneDepth.get_width(), sceneDepth.get_height()) / float2(handDepth.get_width(), handDepth.get_height());\n\
-    float m = 0.0;\n\
-    for (uint y = 0; y < 4; y++) for (uint x = 0; x < 4; x++) {\n\
-        uint2 q = min(gid * 4 + uint2(x, y), lim);\n\
-        // Pixel centres: Metal's fast math makes 1512.0 / 1512.0 slightly below 1, so q * toScene would truncate to q - 1.\n\
-        uint2 sq = min(uint2((float2(q) + 0.5) * toScene), slim);\n\
-        float h = handDepth.read(q), ph = prevHandDepth.read(q);\n\
-        if ((h > 0.0 && h != sceneDepth.read(sq)) || (ph > 0.0 && ph != prevSceneDepth.read(sq))) m = 1.0;\n\
-    }\n\
-    mask.write(float4(m), gid);\n\
-}\n\
-// The hand (and a border of one mask texel) comes from the current real frame.\n\
-kernel void fg_hand(texture2d<float, access::read> mask [[texture(0)]],\n\
-                    texture2d<float, access::read> real [[texture(1)]],\n\
-                    texture2d<float, access::read_write> gen [[texture(2)]],\n\
-                    uint2 gid [[thread_position_in_grid]]) {\n\
-    uint w = gen.get_width(), h = gen.get_height();\n\
-    if (gid.x >= w || gid.y >= h) return;\n\
-    int2 ms = int2(mask.get_width(), mask.get_height());\n\
-    int2 c = int2((float2(gid) + 0.5) * float2(ms) / float2(w, h));\n\
-    float m = 0.0;\n\
-    for (int y = -1; y <= 1; y++) for (int x = -1; x <= 1; x++) m = max(m, mask.read(uint2(clamp(c + int2(x, y), int2(0), ms - 1))).r);\n\
-    if (m > 0.0) gen.write(real.read(gid), gid);\n\
-}\n\
 // Optical flow input at a reduced resolution: box filter of the world image.\n\
 kernel void fg_half(texture2d<float, access::read> src [[texture(0)]],\n\
                     texture2d<float, access::write> dst [[texture(1)]],\n\
@@ -1581,9 +1540,8 @@ fragment float4 fg_present_fs(PresentOut in [[stage_in]], texture2d<float> src [
 
 static id<MTLLibrary> gFgLibrary;
 static id<MTLComputePipelineState> gFgPipelines[FG_PASS_COUNT];
-static id<MTLComputePipelineState> gFgInputsPipeline, gFgHandPipeline, gFgHalfPipeline, gFgClearF, gFgClearU;
-static id<MTLComputePipelineState> gMfxPreparePipeline, gMfxCompositePipeline, gFsrCompositePipeline, gFgHandMaskPipeline;
-static id<MTLTexture> gFgHandMask;
+static id<MTLComputePipelineState> gFgInputsPipeline, gFgHalfPipeline, gFgClearF, gFgClearU;
+static id<MTLComputePipelineState> gMfxPreparePipeline, gMfxCompositePipeline, gFsrCompositePipeline;
 static id<MTLSamplerState> gFgLinearClamp;
 static BOOL gFgCompileFailed;
 static id<MTLCommandQueue> gFgQueue, gFgCopyQueue, gPresentQueue;
@@ -1661,9 +1619,7 @@ static BOOL ensureFgPipelines(void) {
         return NO;
     }
     gFgInputsPipeline = [gDevice newComputePipelineStateWithFunction:[gFgLibrary newFunctionWithName:@"fg_inputs"] error:&error];
-    gFgHandPipeline = [gDevice newComputePipelineStateWithFunction:[gFgLibrary newFunctionWithName:@"fg_hand"] error:&error];
     gFgHalfPipeline = [gDevice newComputePipelineStateWithFunction:[gFgLibrary newFunctionWithName:@"fg_half"] error:&error];
-    gFgHandMaskPipeline = [gDevice newComputePipelineStateWithFunction:[gFgLibrary newFunctionWithName:@"fg_hand_mask"] error:&error];
     gMfxPreparePipeline = [gDevice newComputePipelineStateWithFunction:[gFgLibrary newFunctionWithName:@"fg_mfx_prepare"] error:&error];
     gMfxCompositePipeline = [gDevice newComputePipelineStateWithFunction:[gFgLibrary newFunctionWithName:@"fg_mfx_composite"] error:&error];
     gFsrCompositePipeline = [gDevice newComputePipelineStateWithFunction:[gFgLibrary newFunctionWithName:@"fg_fsr_composite"] error:&error];
@@ -1683,7 +1639,7 @@ static BOOL ensureFgPipelines(void) {
             gFgPipelines[i] = pso;
         }
     });
-    if (failure == nil && (gFgInputsPipeline == nil || gFgHandPipeline == nil || gFgHalfPipeline == nil || gMfxPreparePipeline == nil || gMfxCompositePipeline == nil || gFsrCompositePipeline == nil || gFgHandMaskPipeline == nil || gFgClearF == nil || gFgClearU == nil)) {
+    if (failure == nil && (gFgInputsPipeline == nil || gFgHalfPipeline == nil || gMfxPreparePipeline == nil || gMfxCompositePipeline == nil || gFsrCompositePipeline == nil || gFgClearF == nil || gFgClearU == nil)) {
         failure = [NSString stringWithFormat:@"frame generation helpers: %@", error.localizedDescription];
     }
     const int spdPasses[] = {FG_OF_LUMINANCE_PYRAMID, FG_OF_SCD_DIVERGENCE, FG_FI_GAME_VECTOR_FIELD_INPAINTING_PYRAMID, FG_FI_INPAINTING_PYRAMID};
@@ -1810,8 +1766,6 @@ static BOOL ensureFgResources(id<MTLTexture> world, id<MTLTexture> depth, id<MTL
         ok = ok && gFgPyramidMips[i] != nil;
     }
     gFgDistortion = fgTexture(MTLPixelFormatRG8Unorm, 1, 1, 1, @"FI distortion field (none)");
-    gFgHandMask = fgTexture(MTLPixelFormatR8Unorm, (hand.width + 3) / 4, (hand.height + 3) / 4, 1, @"Frame gen hand mask");
-    ok = ok && gFgHandMask != nil;
     gFgCounters = [gDevice newBufferWithLength:16 options:MTLResourceStorageModeShared];
     if (gFgCounters != nil) memset(gFgCounters.contents, 0, 16);
     ok = ok && gFgOfVector != nil && gFgScdHist != nil && gFgScdPrevHist != nil && gFgScdTemp != nil && gFgScdOut != nil
@@ -1913,7 +1867,6 @@ static void fgCollectProfile(id<MTLCommandBuffer> cb) {
     }];
 }
 
-static void encodeHandFix(id<MTLComputeCommandEncoder> ce, int stage, id<MTLTexture> real, id<MTLTexture> out, const MfxFrameGenParams *p);
 
 // CompositeParams of the composite kernels.
 static void encodeCompositeParams(id<MTLComputeCommandEncoder> ce, const MfxFrameGenParams *p) {
@@ -2179,7 +2132,6 @@ static void encodeFrameGen(id<MTLCommandBuffer> cb, int stage, int slot, const M
     [ce setTexture:real atIndex:2];
     encodeCompositeParams(ce, p);
     dispatch2D(ce, gFsrCompositePipeline, out.width, out.height);
-    encodeHandFix(ce, stage, real, out, p);
     [ce endEncoding];
     if (gProfile) fgCollectProfile(cb);
 }
@@ -2284,34 +2236,8 @@ static void blitCopy(id<MTLBlitCommandEncoder> blit, id<MTLTexture> src, id<MTLT
                 toTexture:dst destinationSlice:0 destinationLevel:0 destinationOrigin:MTLOriginMake(0, 0, 0)];
 }
 
-// Pastes the first-person hand (now and in the previous frame) from the current real frame into the generated one, unless
-// it has its own motion vectors.
-static void encodeHandFix(id<MTLComputeCommandEncoder> ce, int stage, id<MTLTexture> real, id<MTLTexture> out, const MfxFrameGenParams *p) {
-    // The F3 axis crosshair is drawn into the world image without depth and turns with the camera: like the hand, it
-    // comes from the real frame (this frame's box or the previous one's).
-    static float prevCross[2];
-    float cross[4] = {p->crossHalfX, p->crossHalfY, prevCross[0], prevCross[1]};
-    prevCross[0] = p->crossHalfX;
-    prevCross[1] = p->crossHalfY;
-    [ce setComputePipelineState:gFgHandMaskPipeline];
-    uint32_t handMoves = p->handMotion != 0;
-    [ce setBytes:cross length:sizeof cross atIndex:0];
-    [ce setBytes:&handMoves length:sizeof handMoves atIndex:1];
-    [ce setTexture:gFgStageHand[stage] atIndex:0];
-    [ce setTexture:gFgStageHand[(stage + 2) % 3] atIndex:1];
-    [ce setTexture:gFgHandMask atIndex:2];
-    [ce setTexture:gFgStageDepth[stage] atIndex:3];
-    [ce setTexture:gFgStageDepth[(stage + 2) % 3] atIndex:4];
-    dispatch2D(ce, gFgHandMaskPipeline, gFgHandMask.width, gFgHandMask.height);
-    [ce setComputePipelineState:gFgHandPipeline];
-    [ce setTexture:gFgHandMask atIndex:0];
-    [ce setTexture:real atIndex:1];
-    [ce setTexture:out atIndex:2];
-    dispatch2D(ce, gFgHandPipeline, out.width, out.height);
-}
-
 // ---- MetalFX frame interpolation backend (macOS 26+). Interpolates at the same capped size as FSR's render-resolution
-// passes (display / gFgFiDiv), MetalFX spatial scales the result back up, and the HUD and hand come from the real frame.
+// passes (display / gFgFiDiv), MetalFX spatial scales the result back up, and the HUD comes from the real frame.
 static id gMfxInterp; // id<MTLFXFrameInterpolator>
 static id<MTLFXSpatialScaler> gMfxSpatial;
 static id<MTLTexture> gMfxColor[2], gMfxDepth, gMfxMotion, gMfxSmall, gMfxBig;
@@ -2444,7 +2370,6 @@ static int encodeMetalFxGen(id<MTLCommandBuffer> cb, int stage, int slot, const 
     [ce setTexture:out atIndex:3];
     encodeCompositeParams(ce, p);
     dispatch2D(ce, gMfxCompositePipeline, out.width, out.height);
-    encodeHandFix(ce, stage, real, out, p);
     [ce endEncoding];
     return 1;
 }
@@ -2558,25 +2483,6 @@ int mfx_fg_submit(uintptr_t worldTex, uintptr_t finalTex, uintptr_t depthTex, ui
                 encodeFrameGen(cb, stage, slot, params, reset);
             }
             gFgLastBackend = backend;
-            static BOOL maskDumped;
-            if (atomic_load(&gDumpRemaining) > 0 && !maskDumped && gFgHandMask != nil) {
-                maskDumped = YES;
-                NSLog(@"[MetalFX] frame dump: stage %d formats scene %lu hand %lu", stage, (unsigned long)gFgStageDepth[stage].pixelFormat, (unsigned long)gFgStageHand[stage].pixelFormat);
-                dumpDepth(cb, gFgStageDepth[stage], @"stageScene");
-                dumpDepth(cb, gFgStageHand[stage], @"stageHand");
-                dumpDepth(cb, gFgStageDepth[(stage + 2) % 3], @"stagePrevScene");
-                dumpDepth(cb, gFgStageHand[(stage + 2) % 3], @"stagePrevHand");
-                NSUInteger mw = gFgHandMask.width, mh = gFgHandMask.height;
-                id<MTLBuffer> mb = [gDevice newBufferWithLength:mw * mh options:MTLResourceStorageModeShared];
-                id<MTLBlitCommandEncoder> blit = [cb blitCommandEncoder];
-                [blit copyFromTexture:gFgHandMask sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0) sourceSize:MTLSizeMake(mw, mh, 1)
-                             toBuffer:mb destinationOffset:0 destinationBytesPerRow:mw destinationBytesPerImage:mw * mh];
-                [blit endEncoding];
-                NSString *mp = [NSString stringWithFormat:@"%s/handmask_%lux%lu.u8", getenv("MFX_FG_DUMP_DIR"), (unsigned long)mw, (unsigned long)mh];
-                [cb addCompletedHandler:^(id<MTLCommandBuffer> done) {
-                    [[NSData dataWithBytes:mb.contents length:mw * mh] writeToFile:mp atomically:NO];
-                }];
-            }
             if (debugCopy) {
                 if (generated == 1) {
                     id<MTLBlitCommandEncoder> blit = [cb blitCommandEncoder];

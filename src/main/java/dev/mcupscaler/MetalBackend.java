@@ -386,9 +386,8 @@ final class MetalBackend {
 		fgParams.set(ValueLayout.JAVA_FLOAT, 180, 1.0F);
 		fgParams.set(ValueLayout.JAVA_FLOAT, 184, frameTimeMs);
 		fgParams.set(ValueLayout.JAVA_INT, 188, useMetalFxFrameGen() ? 1 : 0);
-		float[] cross = debugCrosshairBox(camera);
-		fgParams.set(ValueLayout.JAVA_FLOAT, 192, cross[0]);
-		fgParams.set(ValueLayout.JAVA_FLOAT, 196, cross[1]);
+		fgParams.set(ValueLayout.JAVA_FLOAT, 192, 0.0F);
+		fgParams.set(ValueLayout.JAVA_FLOAT, 196, 0.0F);
 		fgParams.set(ValueLayout.JAVA_INT, 200, blurredMenuOpen() ? 1 : 0);
 		fgParams.set(ValueLayout.JAVA_INT, 204, 0);
 		fgBoxes.writePlayerBox(fgParams, 208, cameraPos, reset);
@@ -406,25 +405,6 @@ final class MetalBackend {
 		fgPrevHeight = height;
 		fgHistoryValid = true;
 		fgCaptured = true;
-	}
-
-	/**
-	 * Half size (fractions of the image) of a centred box around the F3 axis crosshair, or zeros when it isn't drawn.
-	 * It is a 3D gizmo 0.01 * guiScale long at distance 1 in the hand projection (see DebugCrosshairRenderer).
-	 */
-	private static float[] debugCrosshairBox(CameraRenderState camera) {
-		Minecraft mc = Minecraft.getInstance();
-		var state = mc.gameRenderer.gameRenderState();
-		if (!state.levelRenderState.render3dCrosshair || state.guiRenderState.isHudHidden || !mc.options.getCameraType().isFirstPerson()) {
-			return new float[2];
-		}
-		var window = state.windowRenderState;
-		float tanHalf = (float)Math.tan(Math.toRadians(camera.hudFov) * 0.5);
-		float ndcY = 0.01F * window.guiScale / tanHalf;
-		float aspect = (float)window.width / Math.max(1, window.height);
-		// Margin for the line width and the box's mask texels.
-		float padX = 12.0F / Math.max(1, window.width), padY = 12.0F / Math.max(1, window.height);
-		return new float[] {0.5F * ndcY / aspect * 1.2F + padX, 0.5F * ndcY * 1.2F + padY};
 	}
 
 	/** A menu with the blurred world behind it (the world image no longer shows through as it is). */
