@@ -88,4 +88,5 @@ The Metal FSR shaders in `src/native/mac/fsr3_*.h` are generated from the AMD Fi
 ## License
 
 MIT for this mod's own code, see `LICENSE`. The bundled NVIDIA DLSS and AMD FidelityFX libraries keep their own
-licenses: see `THIRD_PARTY_NOTICES.md` and the full texts in `licenses/` (both are also in the jar).
+licenses (the NVIDIA DLSS files are under the NVIDIA RTX SDKs license, not MIT): see `THIRD_PARTY_NOTICES.md` and the
+full texts in `licenses/` (both are also in the jar). This mod is not sponsored or endorsed by NVIDIA or AMD.

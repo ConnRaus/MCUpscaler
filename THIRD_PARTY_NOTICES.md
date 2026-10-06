@@ -9,11 +9,18 @@ publishers into `_deps/` for building.
 ## NVIDIA DLSS (Windows)
 
 `natives/windows-x64/nvngx_dlss.dll` and `nvngx_dlssg.dll` in the jar are NVIDIA DLSS Super Resolution and Frame
-Generation from the NVIDIA DLSS SDK 310.9.1, and `dlss_bridge.dll` links NVIDIA's NGX SDK statically. They are
-distributed under the NVIDIA RTX SDKs license (`licenses/NVIDIA-RTX-SDKs-LICENSE.txt`,
-https://github.com/NVIDIA/DLSS/blob/main/LICENSE.txt), not under MIT: no permission to modify, reverse engineer or
-redistribute them on their own is granted. NVIDIA, RTX and DLSS are trademarks of NVIDIA Corporation. This mod is not
-sponsored or endorsed by NVIDIA.
+Generation from the NVIDIA DLSS SDK 310.9.1 (NVIDIA's unmodified release libraries), and `dlss_bridge.dll` links
+NVIDIA's NGX SDK statically. They are distributed, and may only be used, under the NVIDIA RTX SDKs license
+(`licenses/NVIDIA-RTX-SDKs-LICENSE.txt`, https://github.com/NVIDIA/DLSS/blob/main/LICENSE.txt), not under MIT: no
+permission to modify, reverse engineer or redistribute them on their own is granted.
+Copyright (c) NVIDIA Corporation. All rights reserved.
+
+The DLSS libraries contain third-party code (curl, an SGI bitmap font, d3dx12 / DirectX-Graphics-Samples, pugixml,
+libnpy, stb and Vulkan-Headers). Their notices, which NVIDIA requires products shipping DLSS to include, are in
+`licenses/NVIDIA-DLSS-third-party-notices.txt`, with the Apache 2.0 text in `licenses/Apache-2.0.txt`.
+
+NVIDIA, RTX and DLSS are trademarks and/or registered trademarks of NVIDIA Corporation in the U.S. and other
+countries. This mod is not sponsored or endorsed by NVIDIA.
 
 ## AMD FidelityFX SDK (FSR 3.1)
 
@@ -24,6 +31,11 @@ AMD FidelityFX SDK 1.1.4 (FSR 3.1 upscaler, optical flow and frame interpolation
 noted in those scripts. The host code in `src/native/mac/metalfx_bridge.m` that drives those passes follows the SDK's.
 These are under AMD's MIT license (`licenses/AMD-FidelityFX-SDK-LICENSE.txt`), Copyright (C) 2024 Advanced Micro
 Devices, Inc. — https://github.com/GPUOpen-LibrariesAndSDKs/FidelityFX-SDK
+
+## Vulkan-Headers
+
+`dlss_bridge.dll` is compiled against the Khronos Vulkan-Headers 1.4.365, Copyright 2015-2026 The Khronos Group Inc.,
+under the Apache License 2.0 (`licenses/Apache-2.0.txt`) — https://github.com/KhronosGroup/Vulkan-Headers
 
 ## Apple MetalFX
 
