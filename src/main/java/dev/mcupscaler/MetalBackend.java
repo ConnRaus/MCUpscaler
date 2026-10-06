@@ -39,11 +39,12 @@ final class MetalBackend {
 	static final long T_FRAME_TIME = 256, T_PLAYER_BOX = 272;
 	/** MfxTemporalParams kind: MetalFX temporal or FSR 3.1. */
 	static final int KIND_METALFX = 0, KIND_FSR = 4;
-	private static final int FG_PARAMS_SIZE = 256;
+	private static final int FG_PARAMS_SIZE = 272;
 
 	static final MemorySegment temporalParams = Arena.global().allocate(TEMPORAL_PARAMS_SIZE, 16);
 	private static final MemorySegment fgParams = Arena.global().allocate(FG_PARAMS_SIZE, 16);
 	private static final float[] matrixScratch = new float[16];
+	private static final float[] vignetteScratch = new float[3];
 
 	private static boolean ready;
 	private static boolean temporalSupported;
@@ -220,6 +221,17 @@ final class MetalBackend {
 		return run((event, wait, done) -> NativeBridge.upscale(in, out, event, wait, done, sharpness), false);
 	}
 
+	/** Draws the shader pack's vignette ({@code vignette} = {shape, a, b}, see VitrailCompat#vignette) over {@code target}. */
+	static int drawVignette(GpuTexture target, float[] vignette) {
+		long out = mtl(target);
+		if (out == 0L) {
+			return missingTextures();
+		}
+		int kind = (int)vignette[0];
+		float a = vignette[1], b = vignette[2];
+		return run((event, wait, done) -> NativeBridge.vignette(out, event, wait, done, kind, a, b), false);
+	}
+
 	/** MetalFX temporal or FSR upscale; {@link #temporalParams} must be written first. */
 	static int upscaleTemporal(GpuTexture src, GpuTexture sceneDepth, GpuTexture handDepth, GpuTexture dst) {
 		long in = mtl(src), depth = mtl(sceneDepth), hand = mtl(handDepth), out = mtl(dst);
@@ -380,6 +392,12 @@ final class MetalBackend {
 		fgParams.set(ValueLayout.JAVA_INT, 200, blurredMenuOpen() ? 1 : 0);
 		fgParams.set(ValueLayout.JAVA_INT, 204, 0);
 		fgBoxes.writePlayerBox(fgParams, 208, cameraPos, reset);
+		// The vignette drawn over the final image after this capture (WorldUpscaler#endWorldMetal): the generated frame gets it too.
+		VitrailCompat.vignette(vignetteScratch);
+		fgParams.set(ValueLayout.JAVA_INT, 256, (int)vignetteScratch[0]);
+		fgParams.set(ValueLayout.JAVA_FLOAT, 260, vignetteScratch[1]);
+		fgParams.set(ValueLayout.JAVA_FLOAT, 264, vignetteScratch[2]);
+		fgParams.set(ValueLayout.JAVA_INT, 268, 0);
 		fgPrevViewProj.set(viewProj);
 		fgPrevCameraPos = cameraPos;
 		fgPrevLevel = level;

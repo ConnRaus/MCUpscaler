@@ -230,6 +230,76 @@ int mfx_upscale(uintptr_t inTex, uintptr_t dstTex, uintptr_t sharedEvent, uint64
     }
 }
 
+static id<MTLLibrary> gLibrary;
+static id<MTLRenderPipelineState> gVignettePipeline;
+static MTLPixelFormat gVignetteFormat;
+static id<MTLTexture> gVignetteSource;
+
+// Draws the shader pack's vignette over dstTex in place (see VIGNETTE_MSL). Returns 1, or -1 on failure.
+int mfx_vignette(uintptr_t dstTex, uintptr_t sharedEvent, uint64_t waitValue, uint64_t signalValue, uint32_t kind, float a, float b) {
+    @autoreleasepool {
+        if (gQueue == nil || sharedEvent == 0) {
+            setError(@"bridge not initialised");
+            return -1;
+        }
+        id<MTLTexture> dst = (__bridge id<MTLTexture>)(void *)dstTex;
+        if (dst == nil || !ensureMotionPipeline()) return -1;
+        if (gVignettePipeline == nil || gVignetteFormat != dst.pixelFormat) {
+            MTLRenderPipelineDescriptor *rp = [MTLRenderPipelineDescriptor new];
+            rp.label = @"Shader pack vignette";
+            rp.vertexFunction = [gLibrary newFunctionWithName:@"fullscreen_vs"];
+            rp.fragmentFunction = [gLibrary newFunctionWithName:@"vignette_fs"];
+            rp.colorAttachments[0].pixelFormat = dst.pixelFormat;
+            NSError *error = nil;
+            gVignettePipeline = [gDevice newRenderPipelineStateWithDescriptor:rp error:&error];
+            if (gVignettePipeline == nil) {
+                setError([NSString stringWithFormat:@"vignette pipeline failed: %@", error.localizedDescription]);
+                return -1;
+            }
+            gVignetteFormat = dst.pixelFormat;
+        }
+        // The image can't be read and drawn at once: the vignette reads a copy.
+        if (gVignetteSource == nil || gVignetteSource.width != dst.width || gVignetteSource.height != dst.height
+            || gVignetteSource.pixelFormat != dst.pixelFormat) {
+            MTLTextureDescriptor *desc = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:dst.pixelFormat
+                width:dst.width height:dst.height mipmapped:NO];
+            desc.usage = MTLTextureUsageShaderRead;
+            desc.storageMode = MTLStorageModePrivate;
+            gVignetteSource = [gDevice newTextureWithDescriptor:desc];
+            if (gVignetteSource == nil) {
+                setError(@"failed to create the vignette texture");
+                return -1;
+            }
+        }
+        id<MTLSharedEvent> event = (__bridge id<MTLSharedEvent>)(void *)sharedEvent;
+        id<MTLCommandBuffer> cb = [gQueue commandBuffer];
+        if (cb == nil) {
+            setError(@"failed to create MTLCommandBuffer");
+            return -1;
+        }
+        cb.label = @"Shader pack vignette";
+        encodeWait(event, waitValue);
+        id<MTLBlitCommandEncoder> blit = [cb blitCommandEncoder];
+        [blit copyFromTexture:dst toTexture:gVignetteSource];
+        [blit endEncoding];
+        MTLRenderPassDescriptor *pass = [MTLRenderPassDescriptor renderPassDescriptor];
+        pass.colorAttachments[0].texture = dst;
+        pass.colorAttachments[0].loadAction = MTLLoadActionDontCare;
+        pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+        id<MTLRenderCommandEncoder> re = [cb renderCommandEncoderWithDescriptor:pass];
+        [re setRenderPipelineState:gVignettePipeline];
+        [re setFragmentTexture:gVignetteSource atIndex:0];
+        struct { uint32_t kind; float a, b; } params = {kind, a, b};
+        [re setFragmentBytes:&params length:sizeof params atIndex:0];
+        [re drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+        [re endEncoding];
+        [cb encodeSignalEvent:event value:signalValue];
+        addCompletionHandler(cb);
+        [cb commit];
+        return 1;
+    }
+}
+
 // ---------------------------------------------------------------------------------------------
 // Temporal upscaling
 // ---------------------------------------------------------------------------------------------
@@ -262,9 +332,28 @@ typedef struct {
 } MfxTemporalParams;
 _Static_assert(sizeof(MfxTemporalParams) == 320, "TemporalParams layout");
 
+// The shader pack's vignette, taken out of the pack (VitrailCompat) and drawn after upscaling and after frame generation
+// captured the world image, so frame generation doesn't move it with the world. Same as the Windows post pass (POST in
+// Shaders.java): kind = a PackVignette shape (0 = none), a and b its settings; display-encoded colour in and out.
+#define VIGNETTE_MSL "\
+struct VignetteParams { uint kind; float a; float b; };\n\
+static float3 packVignette(float3 c, uint2 gid, float2 size, uint kind, float a, float b) {\n\
+    if (kind == 0) return c;\n\
+    float2 uv = (float2(gid) + 0.5) / size;\n\
+    float2 d = uv - 0.5;\n\
+    float v = 1.0;\n\
+    bool lin = true;\n\
+    if (kind == 1) { float s = length(d); s *= s * 0.3535 + 0.75; v = 1.0 - s * a; }\n\
+    else if (kind == 2) { float2 q = d * 2.0; q.x *= mix(1.0, size.x / size.y, b); float rf = dot(q, q) * a * a + 1.0; v = 1.0 / (rf * rf); }\n\
+    else if (kind == 3) { v = pow(max(16.0 * uv.x * uv.y * (1.0 - uv.x) * (1.0 - uv.y), 0.0), 0.08 * a); }\n\
+    else if (kind == 4) { lin = false; v = 1.0 - dot(d, d) * (1.0 - dot(c, float3(0.2125, 0.7154, 0.0721))); }\n\
+    v = saturate(v);\n\
+    return saturate(lin ? pow(pow(max(c, 0.0), 2.2) * v, 1.0 / 2.2) : c * v);\n\
+}\n"
+
 static NSString *const kMotionShader = @"\
 #include <metal_stdlib>\n\
-using namespace metal;\n\
+using namespace metal;\n" VIGNETTE_MSL "\
 struct Params {\n\
     float4x4 curInvViewProj;\n\
     float4x4 prevViewProj;\n\
@@ -369,6 +458,11 @@ fragment half4 rcas_fs(FsOut in [[stage_in]], texture2d<half, access::read> src 
     float3 c = (lobe * float3(b + d + f + h) + float3(e)) / (4.0 * lobe + 1.0);\n\
     return half4(half3(saturate(c)), 1.0h);\n\
 }\n\
+fragment float4 vignette_fs(FsOut in [[stage_in]], texture2d<float, access::read> src [[texture(0)]], constant VignetteParams &v [[buffer(0)]]) {\n\
+    uint2 p = uint2(in.position.xy);\n\
+    float4 c = src.read(p);\n\
+    return float4(packVignette(c.rgb, p, float2(src.get_width(), src.get_height()), v.kind, v.a, v.b), c.a);\n\
+}\n\
 kernel void debug_motion(texture2d<half, access::read> motion [[texture(0)]],\n\
                          texture2d<half, access::write> output [[texture(1)]],\n\
                          uint2 gid [[thread_position_in_grid]]) {\n\
@@ -384,7 +478,6 @@ static id<MTLComputePipelineState> gDebugPipeline;
 static id<MTLComputePipelineState> gMergePipeline;
 static id<MTLBuffer> gMergeBuffer;
 static id<MTLComputePipelineState> gDistantPipeline;
-static id<MTLLibrary> gLibrary;
 static id<MTLRenderPipelineState> gRcasPipeline;
 static MTLPixelFormat gRcasFormat;
 
@@ -1179,7 +1272,7 @@ int mfx_upscale_temporal(uintptr_t inTex, uintptr_t sceneDepthTex, uintptr_t han
 
 #include "fsr3_fg_shaders.h"
 
-// Must match FrameGenParams in WorldUpscaler.java (256 bytes).
+// Must match fgParams in MetalBackend.java (272 bytes).
 typedef struct {
     float curInvViewProj[16];   // inverse(unjittered projection * view rotation), current frame
     float prevViewProj[16];     // unjittered projection * view rotation, previous frame
@@ -1193,8 +1286,11 @@ typedef struct {
     uint32_t pad4;
     float objMin[4], objMax[4]; // third person: the player's box relative to the camera (min > max = none)
     float objDelta[4];          // the player's movement since the previous frame
+    uint32_t vignette;          // the shader pack's vignette drawn over the final image (PackVignette.*, 0 = none)
+    float vignetteA, vignetteB; // its settings
+    uint32_t pad5;
 } MfxFrameGenParams;
-_Static_assert(sizeof(MfxFrameGenParams) == 256, "FrameGenParams layout");
+_Static_assert(sizeof(MfxFrameGenParams) == 272, "FrameGenParams layout");
 
 // cbFI (FrameInterpolationConstants).
 typedef struct {
@@ -1260,7 +1356,8 @@ static NSString *const kFgPassNames[FG_PASS_COUNT] = {
 
 static NSString *const kFgShader = @"\
 #include <metal_stdlib>\n\
-using namespace metal;\n\
+using namespace metal;\n" VIGNETTE_MSL "\
+struct CompositeParams { uint menuOpen; VignetteParams vignette; };\n\
 struct FgParams {\n\
     float4x4 curInvViewProj; float4x4 prevViewProj; float4 camDelta;\n\
     uint zZeroToOne; uint flipY; uint reset; uint debugView;\n\
@@ -1306,18 +1403,21 @@ kernel void fg_mfx_prepare(texture2d<float, access::sample> world [[texture(0)]]
     motion.write(half4(half2(mv), 0.0h, 0.0h), gid);\n\
 }\n\
 // MetalFX backend: generated world image + this frame's HUD (the difference between the final and the world image).\n\
+// The final image has the pack's vignette drawn over the world image: the generated one gets the same.\n\
 kernel void fg_mfx_composite(texture2d<float, access::read> generated [[texture(0)]],\n\
                              texture2d<float, access::read> world [[texture(1)]],\n\
                              texture2d<float, access::read> final [[texture(2)]],\n\
                              texture2d<float, access::write> out [[texture(3)]],\n\
-                             constant uint &menuOpen [[buffer(0)]],\n\
+                             constant CompositeParams &cp [[buffer(0)]],\n\
                              uint2 gid [[thread_position_in_grid]]) {\n\
     if (gid.x >= out.get_width() || gid.y >= out.get_height()) return;\n\
     float3 f = final.read(gid).rgb;\n\
     // A blurred menu: final - world is not the HUD but the whole (blurred) world, which would flicker against it.\n\
-    if (menuOpen != 0) { out.write(float4(f, 1.0), gid); return; }\n\
-    float3 g = generated.read(gid).rgb;\n\
-    float3 delta = f - world.read(gid).rgb;\n\
+    if (cp.menuOpen != 0) { out.write(float4(f, 1.0), gid); return; }\n\
+    float2 size = float2(out.get_width(), out.get_height());\n\
+    VignetteParams v = cp.vignette;\n\
+    float3 g = packVignette(generated.read(gid).rgb, gid, size, v.kind, v.a, v.b);\n\
+    float3 delta = f - packVignette(world.read(gid).rgb, gid, size, v.kind, v.a, v.b);\n\
     float keep = smoothstep(0.08, 0.3, max(max(abs(delta.r), abs(delta.g)), abs(delta.b)));\n\
     out.write(float4(mix(saturate(g + delta), f, keep), 1.0), gid);\n\
 }\n\
@@ -1325,13 +1425,15 @@ kernel void fg_mfx_composite(texture2d<float, access::read> generated [[texture(
 kernel void fg_fsr_composite(texture2d<float, access::read_write> gen [[texture(0)]],\n\
                              texture2d<float, access::read> world [[texture(1)]],\n\
                              texture2d<float, access::read> final [[texture(2)]],\n\
-                             constant uint &menuOpen [[buffer(0)]],\n\
+                             constant CompositeParams &cp [[buffer(0)]],\n\
                              uint2 gid [[thread_position_in_grid]]) {\n\
     if (gid.x >= gen.get_width() || gid.y >= gen.get_height()) return;\n\
     float3 f = final.read(gid).rgb;\n\
-    if (menuOpen != 0) { gen.write(float4(f, 1.0), gid); return; }\n\
-    float3 g = gen.read(gid).rgb;\n\
-    float3 delta = f - world.read(gid).rgb;\n\
+    if (cp.menuOpen != 0) { gen.write(float4(f, 1.0), gid); return; }\n\
+    float2 size = float2(gen.get_width(), gen.get_height());\n\
+    VignetteParams v = cp.vignette;\n\
+    float3 g = packVignette(gen.read(gid).rgb, gid, size, v.kind, v.a, v.b);\n\
+    float3 delta = f - packVignette(world.read(gid).rgb, gid, size, v.kind, v.a, v.b);\n\
     float keep = smoothstep(0.08, 0.3, max(max(abs(delta.r), abs(delta.g)), abs(delta.b)));\n\
     gen.write(float4(mix(saturate(g + delta), f, keep), 1.0), gid);\n\
 }\n\
@@ -1766,6 +1868,12 @@ static void fgCollectProfile(id<MTLCommandBuffer> cb) {
 
 static void encodeHandFix(id<MTLComputeCommandEncoder> ce, int stage, id<MTLTexture> real, id<MTLTexture> out, const MfxFrameGenParams *p);
 
+// CompositeParams of the composite kernels.
+static void encodeCompositeParams(id<MTLComputeCommandEncoder> ce, const MfxFrameGenParams *p) {
+    struct { uint32_t menuOpen, kind; float a, b; } cp = {p->menuOpen, p->vignette, p->vignetteA, p->vignetteB};
+    [ce setBytes:&cp length:sizeof cp atIndex:0];
+}
+
 static void encodeFrameGen(id<MTLCommandBuffer> cb, int stage, int slot, const MfxFrameGenParams *p, BOOL reset) {
     id<MTLTexture> world = gFgStageWorld[stage], prevWorld = gFgStageWorld[(stage + 2) % 3];
     id<MTLTexture> depth = gFgStageDepth[stage], hand = gFgStageHand[stage];
@@ -2022,8 +2130,7 @@ static void encodeFrameGen(id<MTLCommandBuffer> cb, int stage, int slot, const M
     [ce setTexture:out atIndex:0];
     [ce setTexture:world atIndex:1];
     [ce setTexture:real atIndex:2];
-    uint32_t menuOpen = p->menuOpen;
-    [ce setBytes:&menuOpen length:sizeof menuOpen atIndex:0];
+    encodeCompositeParams(ce, p);
     dispatch2D(ce, gFsrCompositePipeline, out.width, out.height);
     encodeHandFix(ce, stage, real, out, p);
     [ce endEncoding];
@@ -2285,8 +2392,7 @@ static int encodeMetalFxGen(id<MTLCommandBuffer> cb, int stage, int slot, const 
     [ce setTexture:world atIndex:1];
     [ce setTexture:real atIndex:2];
     [ce setTexture:out atIndex:3];
-    uint32_t menuOpen = p->menuOpen;
-    [ce setBytes:&menuOpen length:sizeof menuOpen atIndex:0];
+    encodeCompositeParams(ce, p);
     dispatch2D(ce, gMfxCompositePipeline, out.width, out.height);
     encodeHandFix(ce, stage, real, out, p);
     [ce endEncoding];

@@ -24,6 +24,7 @@ public final class VitrailCompat {
 	private static volatile float bakedBias = Float.NaN;
 	private static volatile boolean bakedAaOff;
 	private static volatile boolean bakedStill;
+	private static volatile boolean bakedVignetteOff;
 	private static boolean reloadFailed;
 
 	private static final PackVignette vignette = new PackVignette();
@@ -71,6 +72,14 @@ public final class VitrailCompat {
 	}
 
 	/**
+	 * The pack's vignette darkens the screen edges in the world image, so the temporal upscalers and frame generation
+	 * would move it with the world: it comes out of the pack and is drawn after them (see {@link PackVignette}).
+	 */
+	private static boolean wantedVignetteOff() {
+		return wantedAaOff() || WorldUpscaler.isMetalFrameGenKnownReady();
+	}
+
+	/**
 	 * Waving foliage moves its vertices in the shader, which the depth-based motion vectors can't see: DLSS ghosts and
 	 * smears it. Switched off while DLSS is active (an option).
 	 */
@@ -106,6 +115,7 @@ public final class VitrailCompat {
 		float bias = wantedBias();
 		bakedAaOff = aaOff;
 		bakedStill = still;
+		bakedVignetteOff = wantedVignetteOff();
 		if (aaOff) {
 			lines = disableAa(lines, name);
 		}
@@ -150,13 +160,12 @@ public final class VitrailCompat {
 		if (packJitterName != null && line.contains("TAA") && PackSourcePatches.TAA_DEFINE_OFF.matcher(line).matches() && wantedAaOff()) {
 			return "#define TAA // Upscaler: the pack's jitter carries the upscaler's (its resolve pass is off)";
 		}
-		// Only the Windows upscale pass redraws the vignette after upscaling; on macOS the pack keeps its own.
-		return line.contains("VIGNETTE") ? vignette.rewrite(line, wantedAaOff() && Platform.WINDOWS) : line;
+		return line.contains("VIGNETTE") ? vignette.rewrite(line, wantedVignetteOff()) : line;
 	}
 
-	/** The vignette to draw after upscaling: {shape, a, b} into {@code out}, shape 0 = none. */
+	/** The vignette to draw after upscaling and frame generation: {shape, a, b} into {@code out}, shape 0 = none. */
 	public static void vignette(float[] out) {
-		vignette.write(out, bakedAaOff);
+		vignette.write(out, bakedVignetteOff);
 	}
 
 	// ------------------------------------------------------------------ the pack's own jitter uniform
@@ -231,19 +240,21 @@ public final class VitrailCompat {
 		float bias = wantedBias();
 		boolean aaOff = wantedAaOff();
 		boolean still = wantedStill();
-		if (bias == bakedBias && aaOff == bakedAaOff && still == bakedStill) {
+		boolean vignetteOff = wantedVignetteOff();
+		if (bias == bakedBias && aaOff == bakedAaOff && still == bakedStill && vignetteOff == bakedVignetteOff) {
 			return;
 		}
 		bakedBias = bias;
 		bakedAaOff = aaOff;
 		bakedStill = still;
+		bakedVignetteOff = vignetteOff;
 		try {
 			Method forget = Class.forName("dev.vitrail.pack.source.KeptPack").getDeclaredMethod("forget");
 			forget.setAccessible(true);
 			forget.invoke(null);
 			Class.forName("dev.vitrail.render.PackChoice").getMethod("reload", Path.class).invoke(null, FabricLoader.getInstance().getGameDir());
-			UpscalerMod.LOGGER.info("Reloaded the shader pack with texture LOD bias {}, own anti-aliasing {}, waving foliage {}", bias,
-				aaOff ? "off" : "on", still ? "off" : "on");
+			UpscalerMod.LOGGER.info("Reloaded the shader pack with texture LOD bias {}, own anti-aliasing {}, waving foliage {}, own vignette {}",
+				bias, aaOff ? "off" : "on", still ? "off" : "on", vignetteOff ? "off" : "on");
 		} catch (ReflectiveOperationException | RuntimeException e) {
 			reloadFailed = true;
 			UpscalerMod.LOGGER.warn("Could not reload the Vitrail shader pack for texture LOD correction", e);

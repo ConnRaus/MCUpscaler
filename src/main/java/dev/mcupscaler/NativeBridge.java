@@ -20,6 +20,7 @@ public final class NativeBridge {
 	private static MethodHandle init;
 	private static MethodHandle upscale;
 	private static MethodHandle upscaleTemporal;
+	private static MethodHandle vignette;
 	private static MethodHandle mergePackDepth;
 	private static MethodHandle mergeDistantDepth;
 	private static MethodHandle mergesFlush;
@@ -57,6 +58,13 @@ public final class NativeBridge {
 				FunctionDescriptor.of(
 					ValueLayout.JAVA_INT, ValueLayout.JAVA_LONG, ValueLayout.JAVA_LONG, ValueLayout.JAVA_LONG, ValueLayout.JAVA_LONG, ValueLayout.JAVA_LONG,
 					ValueLayout.JAVA_FLOAT
+				)
+			);
+			vignette = linker.downcallHandle(
+				lookup.findOrThrow("mfx_vignette"),
+				FunctionDescriptor.of(
+					ValueLayout.JAVA_INT, ValueLayout.JAVA_LONG, ValueLayout.JAVA_LONG, ValueLayout.JAVA_LONG, ValueLayout.JAVA_LONG,
+					ValueLayout.JAVA_INT, ValueLayout.JAVA_FLOAT, ValueLayout.JAVA_FLOAT
 				)
 			);
 			upscaleTemporal = linker.downcallHandle(
@@ -147,6 +155,15 @@ public final class NativeBridge {
 	public static int upscale(long inTexture, long dstTexture, long sharedEvent, long waitValue, long signalValue, float sharpness) {
 		try {
 			return (int)upscale.invokeExact(inTexture, dstTexture, sharedEvent, waitValue, signalValue, sharpness);
+		} catch (Throwable t) {
+			throw new RuntimeException(t);
+		}
+	}
+
+	/** Draws the shader pack's vignette over {@code dstTexture} in place; see mfx_vignette in metalfx_bridge.m. */
+	public static int vignette(long dstTexture, long sharedEvent, long waitValue, long signalValue, int kind, float a, float b) {
+		try {
+			return (int)vignette.invokeExact(dstTexture, sharedEvent, waitValue, signalValue, kind, a, b);
 		} catch (Throwable t) {
 			throw new RuntimeException(t);
 		}

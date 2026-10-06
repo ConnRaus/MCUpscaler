@@ -468,11 +468,12 @@ public class UpscalerScreenshotTest implements FabricClientGameTest {
 		// - "look": like a player: walks back and forth (8 blocks either way, flying so it never falls) while looking left
 		//   and right (35 degrees either way, every 2.5 s). "30 look" at a 30 fps cap; "30 jitter look" adds 0-15 ms of CPU
 		//   time per frame on top, for uneven frame times like on a server.
+		// - "shake": shaking the mouse while standing still (25 degrees left and right 3 times a second, 10 up and down).
 		for (UpscalerConfig.Upscaler upscaler : savedWorld ? new UpscalerConfig.Upscaler[] {UpscalerConfig.Upscaler.FSR}
 			: new UpscalerConfig.Upscaler[] {UpscalerConfig.Upscaler.FSR, UpscalerConfig.Upscaler.METALFX})
 		for (UpscalerConfig.FrameGeneration fg : new UpscalerConfig.FrameGeneration[] {UpscalerConfig.FrameGeneration.OFF,
 			UpscalerConfig.FrameGeneration.FSR, UpscalerConfig.FrameGeneration.METALFX}) {
-			for (String phase : fg == UpscalerConfig.FrameGeneration.OFF ? new String[] {"uncapped"} : new String[] {"uncapped", "30 look", "30 jitter look", "look"}) {
+			for (String phase : fg == UpscalerConfig.FrameGeneration.OFF ? new String[] {"uncapped"} : new String[] {"uncapped", "30 look", "30 jitter look", "look", "shake"}) {
 				if (System.getenv("MAC_FG_CAP") != null && !java.util.List.of(System.getenv("MAC_FG_CAP").split(",")).contains(phase)) {
 					continue;
 				}
@@ -495,6 +496,7 @@ public class UpscalerScreenshotTest implements FabricClientGameTest {
 				long[] stats = new long[3];
 				long start = System.nanoTime();
 				boolean look = phase.endsWith("look");
+				boolean shake = phase.equals("shake");
 				boolean jitter = phase.contains("jitter");
 				java.util.Random random = new java.util.Random(1);
 				context.runOnClient(mc -> {
@@ -514,7 +516,12 @@ public class UpscalerScreenshotTest implements FabricClientGameTest {
 							java.util.concurrent.locks.LockSupport.parkNanos(random.nextInt(15_000_000));
 						}
 						float yaw;
-						if (look) {
+						if (shake) {
+							yaw = baseYaw[0] + 25.0F * (float)Math.sin(seconds * 2.0 * Math.PI * 3.0);
+							float pitch = (float)home[3] + 10.0F * (float)Math.sin(seconds * 2.0 * Math.PI * 2.3);
+							mc.player.setXRot(pitch);
+							mc.player.xRotO = pitch;
+						} else if (look) {
 							double sideways = Math.toRadians(baseYaw[0] + 90.0), d = 8.0 * Math.sin(seconds * 2.0 * Math.PI / 12.0);
 							double x = home[0] + Math.cos(sideways) * d, z = home[2] + Math.sin(sideways) * d;
 							mc.player.setPos(x, home[1], z);

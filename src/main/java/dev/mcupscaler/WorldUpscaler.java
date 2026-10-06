@@ -87,6 +87,7 @@ public final class WorldUpscaler {
 	private static final MemorySegment frame = Arena.global().allocate(DlssNative.FRAME_SIZE, 16);
 	/** The shader pack's vignette, drawn after upscaling (VitrailCompat#vignette). */
 	private static final float[] vignette = new float[3];
+	private static boolean vignetteFailureLogged;
 	private static final float[] matrixScratch = new float[16];
 	/** This frame is jittered and upscaled with DLSS. */
 	private static boolean temporalFrame;
@@ -376,6 +377,12 @@ public final class WorldUpscaler {
 		return upscaler.temporal() && supported(upscaler) && upscaler != failedUpscaler;
 	}
 
+	/** macOS frame generation is set up for the selected backend, without setting it up (safe off the render thread). */
+	public static boolean isMetalFrameGenKnownReady() {
+		UpscalerConfig.FrameGeneration backend = UpscalerConfig.frameGeneration;
+		return Platform.MAC && state == State.READY && backend != UpscalerConfig.FrameGeneration.OFF && frameGenSupported(backend);
+	}
+
 	public static boolean isFrameGenAvailable(UpscalerConfig.FrameGeneration backend) {
 		ensureInit();
 		return frameGenSupported(backend);
@@ -613,6 +620,12 @@ public final class WorldUpscaler {
 		}
 		if (capture && levelProjectionCaptured && metalFrameGen()) {
 			MetalBackend.captureForFrameGen(main, depth.sceneDepth(), depth.handDepth(), levelProjection, cameraState());
+		}
+		// After the capture: frame generation interpolates the world without the vignette, which stays put on screen.
+		VitrailCompat.vignette(vignette);
+		if (vignette[0] != PackVignette.NONE && MetalBackend.drawVignette(main.getColorTexture(), vignette) < 0 && !vignetteFailureLogged) {
+			vignetteFailureLogged = true;
+			UpscalerMod.LOGGER.warn("Could not draw the shader pack's vignette: {}", MetalBackend.lastError());
 		}
 	}
 

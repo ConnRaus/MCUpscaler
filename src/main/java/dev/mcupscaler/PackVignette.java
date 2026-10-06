@@ -5,8 +5,9 @@ import java.util.regex.Pattern;
 
 /**
  * A pack's vignette darkens the screen edges in its final pass, before DLSS: DLSS then moves that darkening with the
- * world when the camera turns (a smeared frame around the screen). It is switched off in the pack and the same vignette
- * is drawn after upscaling instead (the post pass in {@link Shaders}).
+ * world when the camera turns (a smeared frame around the screen), and so does frame generation on macOS. It is switched
+ * off in the pack and the same vignette is drawn after upscaling instead (the post pass in {@link Shaders}, and
+ * mfx_vignette in metalfx_bridge.m after frame generation captured the world image).
  */
 final class PackVignette {
 	/** Vignette shapes the post pass knows. */
@@ -52,7 +53,7 @@ final class PackVignette {
 			removed = true;
 			UpscalerMod.LOGGER.info("The shader pack's vignette ({}) is drawn after upscaling", define.group(1));
 		}
-		return "// " + line.trim() + " // DLSS: drawn after upscaling instead";
+		return "// " + line.trim() + " // Upscaler: drawn after upscaling instead";
 	}
 
 	private void readValue(String setting, String number) {
