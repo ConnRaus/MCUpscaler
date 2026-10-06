@@ -26,6 +26,8 @@ final class PackSourcePatches {
 	private static final Pattern TAA_SHARPEN_IF = Pattern.compile("^\\s*#\\s*if\\b.*\\bCAS\\w*.*\\bTAA\\b.*$");
 	/** "Bayer8(gl_FragCoord.xy)": an ordered dither tied to the screen pixel grid. */
 	private static final Pattern PIXEL_DITHER = Pattern.compile("\\b((?:Bayer|BayerCloud)\\d+)\\s*\\(\\s*gl_FragCoord\\.xy\\s*\\)");
+	/** "#define projMAD(m, v) (diagonal3(m) * (v) + (m)[3].xyz)": Chocapic's projection shortcut (Bliss). */
+	private static final Pattern PROJ_MAD = Pattern.compile("^(\\s*)#define\\s+projMAD\\s*\\(\\s*(\\w+)\\s*,\\s*(\\w+)\\s*\\).*diagonal.*$");
 
 	private PackSourcePatches() {
 	}
@@ -53,6 +55,22 @@ final class PackSourcePatches {
 			}
 			out.add(m.group(1) + "//#define " + m.group(2) + " // " + why);
 			out.add(m.group(1) + "#undef " + m.group(2));
+		}
+		return out != null ? out : lines;
+	}
+
+	/**
+	 * Chocapic-style packs (Bliss) project with only the matrix's diagonal and translation, which drops the jitter (it sits
+	 * in the third column): their terrain is drawn unjittered and the upscaler can't add detail. The full 3x3 part keeps it.
+	 */
+	static List<String> fullProjMad(List<String> lines) {
+		List<String> out = null;
+		for (int i = 0; i < lines.size(); i++) {
+			Matcher m = PROJ_MAD.matcher(lines.get(i));
+			if (m.matches()) {
+				out = replace(out, lines, i, m.group(1) + "#define projMAD(" + m.group(2) + ", " + m.group(3) + ") (mat3(" + m.group(2) + ") * ("
+					+ m.group(3) + ") + (" + m.group(2) + ")[3].xyz) // Upscaler: keeps the jitter");
+			}
 		}
 		return out != null ? out : lines;
 	}

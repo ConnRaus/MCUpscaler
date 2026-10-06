@@ -152,7 +152,7 @@ public final class VitrailCompat {
 			return PackSourcePatches.disableTaaResolve(lines, fileName);
 		}
 		lines = PackSourcePatches.commentOut(lines, PackSourcePatches.AA_DEFINE, "off: DLSS anti-aliases");
-		return PackSourcePatches.animateDither(PackSourcePatches.keepTaaNoise(lines));
+		return PackSourcePatches.fullProjMad(PackSourcePatches.animateDither(PackSourcePatches.keepTaaNoise(lines)));
 	}
 
 	/**
