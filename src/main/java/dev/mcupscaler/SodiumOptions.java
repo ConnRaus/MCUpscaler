@@ -1,6 +1,8 @@
 package dev.mcupscaler;
 
+import com.mojang.blaze3d.systems.RenderSystem;
 import java.util.EnumSet;
+import java.util.Locale;
 import java.util.Set;
 import net.caffeinemc.mods.sodium.api.config.ConfigEntryPoint;
 import net.caffeinemc.mods.sodium.api.config.ConfigState;
@@ -217,8 +219,29 @@ public final class SodiumOptions implements ConfigEntryPoint {
 		page.addOptionGroup(advanced);
 		builder.registerOwnModOptions()
 			.setNonTintedIcon(id("textures/gui/config-icon.png"))
-			.setColorTheme(builder.createColorTheme().setBaseThemeRGB(Platform.MAC ? 0x3A8DDE : 0x76B900))
+			.setColorTheme(builder.createColorTheme().setBaseThemeRGB(themeColor()))
 			.addPage(page);
+	}
+
+	/** The page's colour: the GPU vendor's (NVIDIA green, AMD red, Intel or Apple blue). */
+	private static int themeColor() {
+		String gpu;
+		try {
+			var info = RenderSystem.getDevice().getDeviceInfo();
+			gpu = (info.vendorName() + " " + info.name()).toLowerCase(Locale.ROOT);
+		} catch (RuntimeException e) {
+			gpu = "";
+		}
+		if (gpu.contains("nvidia")) {
+			return 0x76B900;
+		}
+		if (gpu.contains("amd") || gpu.contains("radeon") || gpu.contains("ati technologies")) {
+			return 0xED1C24;
+		}
+		if (gpu.contains("intel")) {
+			return 0x0071C5;
+		}
+		return 0x3A8DDE;
 	}
 
 	/** The world's render resolution at this scale, e.g. "2293 x 933" (same rounding as WorldUpscaler.scaled). */
